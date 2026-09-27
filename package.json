@@ -1,0 +1,29 @@
+{
+  "name": "open-source-realtime-voice-agent",
+  "version": "0.1.0",
+  "description": "Production-quality, open-source, low-latency realtime voice agent",
+  "private": true,
+  "scripts": {
+    "dev:frontend": "npm run --prefix frontend dev",
+    "dev:backend": "npm run --prefix backend dev",
+    "build:frontend": "npm run --prefix frontend build",
+    "build:backend": "npm run --prefix backend build",
+    "lint:frontend": "npm run --prefix frontend lint",
+    "lint:backend": "npm run --prefix backend lint"
+  },
+  "keywords": [
+    "voice-agent",
+    "realtime",
+    "livekit",
+    "webrtc",
+    "vad",
+    "stt",
+    "tts",
+    "llm",
+    "hinglish",
+    "hindi",
+    "english"
+  ],
+  "author": "Open Source Realtime Voice Agent Contributors",
+  "license": "MIT"
+}
