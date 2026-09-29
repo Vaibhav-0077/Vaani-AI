@@ -8,8 +8,8 @@ This document tracks development progress according to the 10-phase incremental 
 
 | Phase | Description | Status |
 | :--- | :--- | :--- |
-| **Phase 0** | Project architecture, repository setup, and documentation foundation | **In Progress / Current** |
-| **Phase 1** | Frontend shell and voice-agent UI | Planned |
+| **Phase 0** | Project architecture, repository setup, and documentation foundation | **Completed** |
+| **Phase 1** | Frontend shell and voice-agent UI | Planned (Next) |
 | **Phase 2** | Realtime connection and microphone pipeline | Planned |
 | **Phase 3** | Basic STT → LLM → TTS voice pipeline | Planned |
 | **Phase 4** | Streaming optimization and interruption handling | Planned |
