@@ -1,7 +1,7 @@
 {
-  "name": "open-source-realtime-voice-agent",
+  "name": "vaani-ai",
   "version": "0.1.0",
-  "description": "Production-quality, open-source, low-latency realtime voice agent",
+  "description": "Vaani-AI: Production-quality, open-source, low-latency realtime voice agent (English, Hindi, Hinglish)",
   "private": true,
   "scripts": {
     "dev:frontend": "npm run --prefix frontend dev",
