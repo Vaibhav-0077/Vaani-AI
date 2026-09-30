@@ -4,7 +4,7 @@
 > Conversational AI in **English**, **Hindi**, and **Hinglish** with sub-800ms response times, streaming audio, and instant barge-in interruption.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Status: Phase 0 Complete](https://img.shields.io/badge/Status-Phase%200%20Complete-green.svg)](#-project-roadmap--phase-tracker)
+[![Status: Phase 1 Complete](https://img.shields.io/badge/Status-Phase%201%20Complete-green.svg)](#7-project-roadmap--phase-tracker)
 [![Architecture: Pluggable](https://img.shields.io/badge/Architecture-Modular%20%26%20Pluggable-purple.svg)](#-system-architecture)
 
 ---
@@ -182,7 +182,7 @@ npm run dev
 Vaani-AI is engineered systematically in 10 sequential phases:
 
 * [x] **PHASE 0:** Project architecture, repository setup, and documentation foundation.
-* [ ] **PHASE 1:** Frontend shell and voice-agent UI.
+* [x] **PHASE 1:** Frontend shell and voice-agent UI.
 * [ ] **PHASE 2:** Realtime connection and microphone pipeline.
 * [ ] **PHASE 3:** Basic STT → LLM → TTS voice pipeline.
 * [ ] **PHASE 4:** Streaming optimization and interruption handling.
@@ -195,6 +195,15 @@ Vaani-AI is engineered systematically in 10 sequential phases:
 ---
 
 ## 8. Changelog
+
+### [Phase 1] - Frontend Voice UI Shell
+* Built responsive dark-theme voice assistant interface using React 19, TypeScript (strict), Vite, and Tailwind CSS.
+* Implemented Voice Orb Visualizer with animated multi-bar equalizer and state-driven ambient glow.
+* Synchronized 6 visual voice states: `IDLE`, `CONNECTING`, `LISTENING`, `THINKING`, `SPEAKING`, `ERROR`.
+* Built Live Conversation Transcript area with role badges, timestamps, auto-scroll, and clear conversation button.
+* Built Control Bar with microphone mute/unmute, call connection toggle, text input fallback with message sending, and developer state simulator.
+* Built Voice Agent Settings modal supporting conversation language (English, Hindi, Hinglish auto-detect), speech speed multiplier (0.8x-1.5x), continuous voice mode, and auto-scroll.
+* Production build verified at 254kB bundled JS with sub-75ms oxlint pass.
 
 ### [Phase 0] - Project Architecture & Foundation
 * Initialized modular monorepo structure (`frontend/`, `backend/`, `agent/`).
