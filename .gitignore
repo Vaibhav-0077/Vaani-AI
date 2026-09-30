@@ -76,5 +76,11 @@ Thumbs.db
 *.suo
 *.ntvs*
 *.njsproj
-*.sln
 *.sw?
+
+# Local documentation (only root README.md is tracked and pushed to GitHub)
+docs/
+CONTRIBUTING.md
+agent/README.md
+backend/README.md
+frontend/README.md
