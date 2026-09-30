@@ -88,6 +88,19 @@ Browser (React + TypeScript UI)
 
 ---
 
+### Component Separation & Tier Boundaries
+
+| Tier | Primary Role | Tech Stack | Execution Context | What It DOES NOT Do |
+| :--- | :--- | :--- | :--- | :--- |
+| **Frontend** | Presentation, WebRTC media capture/playback, UI states, user gestures | React 19, TypeScript, Tailwind, LiveKit Client SDK | Browser (Client) | Never handles API keys; never communicates directly with LLM/TTS/Database. |
+| **Backend** | Auth, session issuance, ephemeral LiveKit room token signing, user settings | Node.js, Express, Mongoose | Server (Node.js runtime) | Does not process real-time raw audio streams; does not run neural inference. |
+| **Voice Agent** | Real-time orchestration, turn detection, barge-in cancellation, VAD-STT-LLM-TTS coordination | Python 3.10+, `livekit-agents`, `asyncio` | Server / Worker Process | Does not serve static web assets; does not handle user passwords or HTTP auth. |
+| **Realtime Infrastructure**| Ultra-low latency audio/video WebRTC routing, ICE negotiation, SFU publishing/subscribing | LiveKit SFU (Cloud or Self-Hosted Go Server) | Dedicated Network Edge | Does not make conversational AI decisions; purely transports audio frames & data channels. |
+| **Database** | Persistent user records, conversation transcripts, usage logs, user settings | MongoDB Atlas (Mongoose) | Managed Database Cluster | Does not store transient streaming audio chunks; only final session metadata. |
+| **AI Inference** | Speech-to-text, token generation, audio synthesis | Deepgram, Groq, OpenAI, Cartesia OR local GPU (vLLM, Qwen3-ASR/TTS) | Specialized AI Cloud / Dedicated GPU Hardware | Does not manage WebRTC peer connections or persistent application state. |
+
+---
+
 ## 4. Hardware Sizing & Deployment Tiers
 
 You do **not** need a high-end GPU to run or develop Vaani-AI:
