@@ -12,7 +12,11 @@ export function App() {
 
   const {
     voiceState,
+    connectionStatus,
     isMuted,
+    audioLevel,
+    errorMessage,
+    roomInfo,
     interimTranscript,
     messages,
     settings,
@@ -53,7 +57,7 @@ export function App() {
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
               Audio Core
             </span>
-            <span className="text-[11px] text-slate-500">
+            <span className="text-[11px] text-slate-500 font-mono">
               WebRTC Opus 48kHz
             </span>
           </div>
@@ -62,15 +66,28 @@ export function App() {
           <VoiceVisualizer
             state={voiceState}
             isMuted={isMuted}
+            audioLevel={audioLevel}
+            errorMessage={errorMessage}
+            roomName={roomInfo?.name}
             onToggleMic={toggleMute}
             onRetry={toggleConnection}
           />
 
           {/* Bottom Audio Info Footer */}
           <div className="flex items-center justify-between text-xs text-slate-500 border-t border-slate-900 pt-3 z-10">
-            <span className="flex items-center gap-1.5">
-              <span className={`w-1.5 h-1.5 rounded-full ${voiceState !== 'IDLE' && voiceState !== 'ERROR' ? 'bg-emerald-400' : 'bg-slate-600'}`} />
-              {voiceState !== 'IDLE' && voiceState !== 'ERROR' ? 'Room Active' : 'Disconnected'}
+            <span className="flex items-center gap-1.5 font-mono text-[11px]">
+              <span
+                className={`w-2 h-2 rounded-full transition-colors ${
+                  connectionStatus === 'CONNECTED'
+                    ? 'bg-emerald-400 shadow-sm shadow-emerald-400/50'
+                    : connectionStatus === 'CONNECTING' || connectionStatus === 'RECONNECTING'
+                    ? 'bg-amber-400 animate-ping'
+                    : connectionStatus === 'ERROR'
+                    ? 'bg-rose-500'
+                    : 'bg-slate-600'
+                }`}
+              />
+              <span className="uppercase">{connectionStatus}</span>
             </span>
             <span>Target Latency: &lt;800ms</span>
           </div>

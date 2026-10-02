@@ -9,7 +9,9 @@
     "build:frontend": "npm run --prefix frontend build",
     "build:backend": "npm run --prefix backend build",
     "lint:frontend": "npm run --prefix frontend lint",
-    "lint:backend": "npm run --prefix backend lint"
+    "lint:backend": "npm run --prefix backend lint",
+    "test:backend": "npm run --prefix backend test",
+    "test": "npm run test:backend && npm run lint:frontend && npm run build:frontend"
   },
   "keywords": [
     "voice-agent",

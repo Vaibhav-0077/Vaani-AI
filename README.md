@@ -4,7 +4,7 @@
 > Conversational AI in **English**, **Hindi**, and **Hinglish** with sub-800ms response times, streaming audio, and instant barge-in interruption.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Status: Phase 1 Complete](https://img.shields.io/badge/Status-Phase%201%20Complete-green.svg)](#7-project-roadmap--phase-tracker)
+[![Status: Phase 2 Complete](https://img.shields.io/badge/Status-Phase%202%20Complete-green.svg)](#7-project-roadmap--phase-tracker)
 [![Architecture: Pluggable](https://img.shields.io/badge/Architecture-Modular%20%26%20Pluggable-purple.svg)](#-system-architecture)
 
 ---
@@ -183,7 +183,7 @@ Vaani-AI is engineered systematically in 10 sequential phases:
 
 * [x] **PHASE 0:** Project architecture, repository setup, and documentation foundation.
 * [x] **PHASE 1:** Frontend shell and voice-agent UI.
-* [ ] **PHASE 2:** Realtime connection and microphone pipeline.
+* [x] **PHASE 2:** Realtime connection and microphone pipeline.
 * [ ] **PHASE 3:** Basic STT → LLM → TTS voice pipeline.
 * [ ] **PHASE 4:** Streaming optimization and interruption handling.
 * [ ] **PHASE 5:** Conversation history, authentication, and user settings.
@@ -195,6 +195,16 @@ Vaani-AI is engineered systematically in 10 sequential phases:
 ---
 
 ## 8. Changelog
+
+### [Phase 2] - Realtime Connection & Microphone Pipeline
+* Implemented Node.js + Express backend token service in `backend/` with `livekit-server-sdk`.
+* Added `/api/token`, `/api/health`, and `/api/status` endpoints with 15-minute ephemeral LiveKit JWT generation and input sanitization.
+* Integrated `livekit-client` in `frontend/` managing WebRTC connection, room events, and audio publishing.
+* Implemented browser microphone permissions handling (`createLocalAudioTrack` with echo cancellation and noise suppression).
+* Built Web Audio API real-time microphone metering (`AudioContext` + `AnalyserNode`) dynamically driving the voice visualizer.
+* Added connection lifecycle states explicitly rendering `CONNECTING`, `CONNECTED`, `DISCONNECTED`, and `ERROR`.
+* Added automated backend test suite (`backend/tests/phase2_pipeline.test.js`) and unified root `npm test`.
+* Verified zero secrets in client: LiveKit secrets remain exclusively on the backend server.
 
 ### [Phase 1] - Frontend Voice UI Shell
 * Built responsive dark-theme voice assistant interface using React 19, TypeScript (strict), Vite, and Tailwind CSS.

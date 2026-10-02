@@ -2,8 +2,8 @@ import type { VoiceState, StateConfig } from '../types';
 
 export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
   IDLE: {
-    label: 'Ready / Standby',
-    description: 'Tap microphone or start speaking to begin',
+    label: 'DISCONNECTED',
+    description: 'Tap "Start Voice Call" to request token and connect',
     badgeBg: 'bg-slate-800/80',
     badgeText: 'text-slate-300',
     borderColor: 'border-slate-700/60',
@@ -11,8 +11,8 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     glowColor: 'shadow-slate-500/10',
   },
   CONNECTING: {
-    label: 'Connecting WebRTC',
-    description: 'Establishing low-latency peer connection...',
+    label: 'CONNECTING',
+    description: 'Requesting token from backend & establishing WebRTC transport...',
     badgeBg: 'bg-amber-950/50',
     badgeText: 'text-amber-300',
     borderColor: 'border-amber-600/60',
@@ -20,8 +20,8 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     glowColor: 'shadow-amber-500/20',
   },
   LISTENING: {
-    label: 'Listening...',
-    description: 'Mic active • Detecting speech in EN / HI / Hinglish',
+    label: 'CONNECTED',
+    description: 'LiveKit Room Active • Microphone streaming audio',
     badgeBg: 'bg-emerald-950/60',
     badgeText: 'text-emerald-300',
     borderColor: 'border-emerald-500/70',
@@ -29,8 +29,8 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     glowColor: 'shadow-emerald-500/30',
   },
   THINKING: {
-    label: 'Thinking...',
-    description: 'Processing speech turn & generating response',
+    label: 'THINKING',
+    description: 'Speech turn captured • LLM processing response',
     badgeBg: 'bg-indigo-950/60',
     badgeText: 'text-indigo-300',
     borderColor: 'border-indigo-500/70',
@@ -38,8 +38,8 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     glowColor: 'shadow-indigo-500/30',
   },
   SPEAKING: {
-    label: 'Speaking',
-    description: 'Streaming audio synthesis • Interrupt anytime',
+    label: 'SPEAKING',
+    description: 'Streaming audio playback • Interruption enabled',
     badgeBg: 'bg-cyan-950/60',
     badgeText: 'text-cyan-300',
     borderColor: 'border-cyan-500/70',
@@ -47,8 +47,8 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     glowColor: 'shadow-cyan-500/30',
   },
   ERROR: {
-    label: 'Connection Error',
-    description: 'Failed to connect. Please check permissions.',
+    label: 'ERROR',
+    description: 'Connection failed or microphone permission denied',
     badgeBg: 'bg-rose-950/60',
     badgeText: 'text-rose-300',
     borderColor: 'border-rose-500/70',
