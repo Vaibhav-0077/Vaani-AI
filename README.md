@@ -4,8 +4,8 @@
 > Conversational AI in **English**, **Hindi**, and **Hinglish** with sub-800ms response times, streaming audio, and instant barge-in interruption.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Status: Phase 2 Complete](https://img.shields.io/badge/Status-Phase%202%20Complete-green.svg)](#7-project-roadmap--phase-tracker)
-[![Architecture: Pluggable](https://img.shields.io/badge/Architecture-Modular%20%26%20Pluggable-purple.svg)](#-system-architecture)
+[![Status: Phase 3 Complete](https://img.shields.io/badge/Status-Phase%203%20Complete-green.svg)](#7-project-roadmap--phase-tracker)
+[![Architecture: Pluggable](https://img.shields.io/badge/Architecture-Modular%20%26%20Pluggable-purple.svg)](#3-system-architecture)
 
 ---
 
@@ -124,13 +124,17 @@ You do **not** need a high-end GPU to run or develop Vaani-AI:
 ```
 Vaani-AI/
 ├── .env.example              # Standardized environment variables
-├── .gitignore                # Multi-stack gitignore rules
+├── .gitignore                # Multi-stack gitignore rules (docs kept local)
 ├── LICENSE                   # Open-source MIT License
 ├── README.md                 # Single consolidated documentation
 ├── package.json              # Monorepo orchestration scripts
 ├── frontend/                 # React 19 + TypeScript + Tailwind UI
 ├── backend/                  # Node.js + Express + MongoDB Token & Auth API
-└── agent/                    # Python LiveKit Voice Agent Worker
+└── agent/                    # Python Voice Agent Pipeline & Worker
+    ├── adapters/             # Pluggable VAD, STT, LLM, TTS providers
+    ├── core/                 # Pipeline orchestrator, context & config
+    ├── tests/                # Automated pipeline test suite
+    └── main.py               # Benchmark runner & interactive CLI
 ```
 
 ---
@@ -150,21 +154,21 @@ Fill in your `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, and speech/
 
 ### 6.3 Running Components
 
+#### Python Voice Agent & Benchmarks (`agent/`)
+```bash
+# Run automated pipeline test suite
+npm run test:agent
+
+# Run interactive voice pipeline & latency benchmark
+npm run agent
+```
+
 #### Backend Token Service (`backend/`)
 ```bash
 cd backend
 npm install
 npm run dev
 # Running on http://localhost:5000
-```
-
-#### Python Voice Agent (`agent/`)
-```bash
-cd agent
-python -m venv .venv
-# Windows: .venv\Scripts\Activate.ps1 | macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
-python main.py dev
 ```
 
 #### Frontend Client (`frontend/`)
@@ -184,7 +188,7 @@ Vaani-AI is engineered systematically in 10 sequential phases:
 * [x] **PHASE 0:** Project architecture, repository setup, and documentation foundation.
 * [x] **PHASE 1:** Frontend shell and voice-agent UI.
 * [x] **PHASE 2:** Realtime connection and microphone pipeline.
-* [ ] **PHASE 3:** Basic STT → LLM → TTS voice pipeline.
+* [x] **PHASE 3:** Basic STT → LLM → TTS voice pipeline.
 * [ ] **PHASE 4:** Streaming optimization and interruption handling.
 * [ ] **PHASE 5:** Conversation history, authentication, and user settings.
 * [ ] **PHASE 6:** Tool calling and useful built-in tools.
@@ -195,6 +199,22 @@ Vaani-AI is engineered systematically in 10 sequential phases:
 ---
 
 ## 8. Changelog
+
+### [Phase 3] - First Working Voice Pipeline
+* Implemented modular provider architecture in `agent/adapters/`:
+  * `BaseVAD`, `BaseSTT`, `BaseLLM`, `BaseTTS` contracts with typed results.
+  * `EnergyVAD`: Zero-dependency RMS linear PCM energy detector (`0.95ms` CPU execution).
+  * `MockSTT`, `SpeechRecognitionSTT` (English/Hindi), and `Qwen3ASRAdapter` (open-source speech recognition).
+  * `MockLLM`, `OpenAILLM` (Groq Llama-3.3 / OpenAI GPT-4o-mini), and `OllamaLLM` (local models).
+  * `MockTTS`, `Pyttsx3TTS` (offline zero-cloud Windows SAPI5 synthesizer), and `Qwen3TTSAdapter` (open-source neural speech).
+* Built conversational dialogue memory in `agent/core/context.py` (`ConversationContext`) with sliding window turn retention.
+* Built end-to-end `VoicePipeline` in `agent/core/pipeline.py` linking `VAD -> STT -> Context -> LLM -> TTS -> Audio Output` with sub-millisecond instrumentation.
+* Implemented full text fallback interface (`pipeline.process_text()`).
+* Benchmarked end-to-end turn latencies:
+  * Silence Early Exit: **0.95 ms**
+  * Full Voice Turn (English): **658.13 ms** (VAD 3.45ms, STT 40.43ms, LLM 80.53ms, TTS 533.65ms)
+  * Text Fallback (Hinglish): **273.67 ms** (LLM 80.35ms, TTS 193.28ms)
+* Added automated unit test suite in `agent/tests/test_pipeline.py` (12 tests passing).
 
 ### [Phase 2] - Realtime Connection & Microphone Pipeline
 * Implemented Node.js + Express backend token service in `backend/` with `livekit-server-sdk`.

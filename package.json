@@ -10,8 +10,10 @@
     "build:backend": "npm run --prefix backend build",
     "lint:frontend": "npm run --prefix frontend lint",
     "lint:backend": "npm run --prefix backend lint",
+    "agent": "python agent/main.py",
     "test:backend": "npm run --prefix backend test",
-    "test": "npm run test:backend && npm run lint:frontend && npm run build:frontend"
+    "test:agent": "python -m unittest agent/tests/test_pipeline.py",
+    "test": "npm run test:backend && npm run test:agent && npm run lint:frontend && npm run build:frontend"
   },
   "keywords": [
     "voice-agent",
