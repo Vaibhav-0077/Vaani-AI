@@ -5,6 +5,7 @@ import { TranscriptArea } from './components/TranscriptArea';
 import { ControlBar } from './components/ControlBar';
 import { SettingsModal } from './components/SettingsModal';
 import { StatusBadge } from './components/StatusBadge';
+import { LatencyInspector } from './components/LatencyInspector';
 import { useVoiceSession } from './hooks/useVoiceSession';
 
 export function App() {
@@ -20,6 +21,8 @@ export function App() {
     interimTranscript,
     messages,
     settings,
+    lastLatencyMetrics,
+    interrupt,
     toggleConnection,
     toggleMute,
     sendMessage,
@@ -72,6 +75,17 @@ export function App() {
             onToggleMic={toggleMute}
             onRetry={toggleConnection}
           />
+
+          {/* Phase 4 Real-time Streaming Latency Inspector */}
+          {settings.debugMode && (
+            <div className="z-10 my-3">
+              <LatencyInspector
+                metrics={lastLatencyMetrics}
+                voiceState={voiceState}
+                onInterrupt={interrupt}
+              />
+            </div>
+          )}
 
           {/* Bottom Audio Info Footer */}
           <div className="flex items-center justify-between text-xs text-slate-500 border-t border-slate-900 pt-3 z-10">

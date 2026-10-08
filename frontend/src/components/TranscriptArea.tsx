@@ -122,9 +122,21 @@ export const TranscriptArea: React.FC<TranscriptAreaProps> = ({
                       })}
                     </span>
 
+                    {msg.latencyMetrics?.ttfaMs && (
+                      <span className="px-1.5 py-0.2 rounded bg-cyan-950/80 text-cyan-300 border border-cyan-800/60 font-mono text-[9px]">
+                        TTFA {Math.round(msg.latencyMetrics.ttfaMs)}ms
+                      </span>
+                    )}
+
                     {msg.latencyMs && (
-                      <span className="px-1.5 py-0.2 rounded bg-slate-800 text-emerald-400 border border-slate-700">
+                      <span className="px-1.5 py-0.2 rounded bg-slate-800 text-emerald-400 border border-slate-700 font-mono text-[9px]">
                         {msg.latencyMs}ms
+                      </span>
+                    )}
+
+                    {msg.interrupted && (
+                      <span className="px-1.5 py-0.2 rounded bg-rose-950/70 text-rose-300 border border-rose-800/60 text-[9px]">
+                        Interrupted
                       </span>
                     )}
 

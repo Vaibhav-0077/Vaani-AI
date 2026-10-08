@@ -1,18 +1,20 @@
 """
 Speech-to-Text (STT) Provider Implementations.
-Includes MockSTT, WhisperSTT, and Qwen3ASRAdapter.
+Includes MockSTT, SpeechRecognitionSTT, and Qwen3ASRAdapter.
+Enhanced with streaming audio chunk consumption and partial transcript emission (Phase 4).
 """
 
 import time
 import io
-import wave
-from typing import Optional
-from .base import BaseSTT, STTResult
+import asyncio
+from typing import Optional, AsyncIterator
+from .base import BaseSTT, STTResult, STTChunk
 
 
 class MockSTT(BaseSTT):
     """
     Mock STT provider for unit testing, offline development, and zero-key validation.
+    Supports both batch transcribe and streaming chunk emission with partial transcripts.
     """
 
     def __init__(self, default_text: str = "Hello Vaani, how does this voice agent work?"):
@@ -31,6 +33,49 @@ class MockSTT(BaseSTT):
             confidence=0.98,
             language=detected_lang,
             duration_ms=round(duration, 2),
+        )
+
+    async def stream_transcribe(
+        self, audio_chunk_stream: AsyncIterator[bytes], language: str = "auto"
+    ) -> AsyncIterator[STTChunk]:
+        """
+        Consumes streaming audio chunks and emits progressive partial transcripts
+        followed by a final transcript chunk.
+        """
+        start_time = time.perf_counter()
+        words = self.default_text.split()
+        detected_lang = "hi" if any(w in self.default_text.lower() for w in ["kya", "aap", "kaise", "namaste"]) else "en"
+
+        # Drain chunks while emitting progressive partial transcripts
+        accumulated_chunks = []
+        chunk_idx = 0
+
+        async for chunk in audio_chunk_stream:
+            accumulated_chunks.append(chunk)
+            chunk_idx += 1
+
+            # Periodically emit partial transcript updates
+            if chunk_idx % 2 == 0 and words:
+                partial_word_count = min(len(words), max(1, (chunk_idx * len(words)) // 6))
+                partial_text = " ".join(words[:partial_word_count])
+                duration = (time.perf_counter() - start_time) * 1000
+                yield STTChunk(
+                    text=partial_text,
+                    is_final=False,
+                    confidence=0.85,
+                    language=detected_lang,
+                    duration_ms=round(duration, 2),
+                )
+                await asyncio.sleep(0.01)
+
+        # Final complete transcript
+        total_duration = (time.perf_counter() - start_time) * 1000
+        yield STTChunk(
+            text=self.default_text,
+            is_final=True,
+            confidence=0.98,
+            language=detected_lang,
+            duration_ms=round(total_duration, 2),
         )
 
 
@@ -73,7 +118,7 @@ class SpeechRecognitionSTT(BaseSTT):
                 language=target_lang[:2],
                 duration_ms=round(duration, 2),
             )
-        except Exception as e:
+        except Exception:
             duration = (time.perf_counter() - start_time) * 1000
             # Fallback gracefully
             return STTResult(
@@ -82,6 +127,27 @@ class SpeechRecognitionSTT(BaseSTT):
                 language="en",
                 duration_ms=round(duration, 2),
             )
+
+    async def stream_transcribe(
+        self, audio_chunk_stream: AsyncIterator[bytes], language: str = "auto"
+    ) -> AsyncIterator[STTChunk]:
+        """Buffers streaming chunks and yields final transcription with interim state."""
+        start_time = time.perf_counter()
+        chunks = []
+        async for chunk in audio_chunk_stream:
+            chunks.append(chunk)
+
+        full_audio = b"".join(chunks)
+        res = self.transcribe(full_audio, language=language)
+        duration = (time.perf_counter() - start_time) * 1000
+
+        yield STTChunk(
+            text=res.text,
+            is_final=True,
+            confidence=res.confidence,
+            language=res.language,
+            duration_ms=round(duration, 2),
+        )
 
 
 class Qwen3ASRAdapter(BaseSTT):
@@ -117,10 +183,17 @@ class Qwen3ASRAdapter(BaseSTT):
                         language=data.get("language", language),
                         duration_ms=round(duration, 2),
                     )
-            except Exception as e:
+            except Exception:
                 pass  # Fall back to default adapter
 
         # Fallback
         res = self._fallback.transcribe(audio_bytes, language)
         res.duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
         return res
+
+    async def stream_transcribe(
+        self, audio_chunk_stream: AsyncIterator[bytes], language: str = "auto"
+    ) -> AsyncIterator[STTChunk]:
+        """Streaming transcription adapter with fallback."""
+        async for chunk in self._fallback.stream_transcribe(audio_chunk_stream, language):
+            yield chunk

@@ -8,13 +8,20 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-from ..adapters.base import BaseVAD, BaseSTT, BaseLLM, BaseTTS
+from ..adapters.base import (
+    BaseVAD,
+    BaseSTT,
+    BaseLLM,
+    BaseTTS,
+    TurnLatencyProfile,
+)
 from ..adapters.vad import EnergyVAD, SileroVADAdapter
 from ..adapters.stt import MockSTT, SpeechRecognitionSTT, Qwen3ASRAdapter
 from ..adapters.llm import MockLLM, OpenAILLM, OllamaLLM
 from ..adapters.tts import MockTTS, Pyttsx3TTS, Qwen3TTSAdapter
 from .context import ConversationContext
 from .config import AgentConfig, get_config
+from .streaming_pipeline import StreamingVoicePipeline, StreamingPipelineResult
 
 
 @dataclass
@@ -26,6 +33,7 @@ class PipelineResult:
     audio_format: str = "wav"
     detected_language: str = "en"
     latencies: Dict[str, float] = field(default_factory=dict)
+    latency_profile: TurnLatencyProfile = field(default_factory=TurnLatencyProfile)
     error: Optional[str] = None
 
 

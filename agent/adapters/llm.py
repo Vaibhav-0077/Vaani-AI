@@ -1,11 +1,14 @@
 """
 Large Language Model (LLM) Provider Implementations.
 Includes MockLLM, OpenAILLM (Groq/OpenAI compatible), and OllamaLLM.
+Enhanced with token-level streaming generation, first-token (TTFT) instrumentation,
+and async cancellation support (Phase 4).
 """
 
 import time
-from typing import List, Dict, Optional
-from .base import BaseLLM, LLMResult
+import asyncio
+from typing import List, Dict, Optional, AsyncIterator
+from .base import BaseLLM, LLMResult, LLMChunk
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are Vaani, a friendly, concise, and articulate AI voice assistant. "
@@ -18,6 +21,7 @@ DEFAULT_SYSTEM_PROMPT = (
 class MockLLM(BaseLLM):
     """
     Mock LLM provider for fast unit tests, deterministic verification, and offline development.
+    Supports token-by-token streaming with simulated TTFT and inter-token intervals.
     """
 
     def generate(
@@ -54,6 +58,42 @@ class MockLLM(BaseLLM):
             tokens_used=tokens,
             duration_ms=round(duration, 2),
         )
+
+    async def stream_generate(
+        self,
+        messages: List[Dict[str, str]],
+        system_prompt: Optional[str] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 150,
+    ) -> AsyncIterator[LLMChunk]:
+        """
+        Streams words/tokens incrementally with accurate TTFT and cancellation support.
+        """
+        start_time = time.perf_counter()
+        # Simulate TTFT delay (e.g. 50ms)
+        await asyncio.sleep(0.05)
+
+        full_res = self.generate(messages, system_prompt, temperature, max_tokens)
+        words = full_res.text.split(" ")
+        accumulated: List[str] = []
+
+        for i, word in enumerate(words):
+            delta = word + (" " if i < len(words) - 1 else "")
+            accumulated.append(delta)
+            is_first = (i == 0)
+            is_final = (i == len(words) - 1)
+            duration = (time.perf_counter() - start_time) * 1000
+
+            yield LLMChunk(
+                delta=delta,
+                accumulated_text="".join(accumulated),
+                is_first_token=is_first,
+                is_final=is_final,
+                duration_ms=round(duration, 2),
+            )
+            # Simulate natural inter-token arrival time (10ms)
+            if not is_final:
+                await asyncio.sleep(0.01)
 
 
 class OpenAILLM(BaseLLM):
@@ -119,11 +159,85 @@ class OpenAILLM(BaseLLM):
                 tokens_used=tokens,
                 duration_ms=round(duration, 2),
             )
-        except Exception as e:
-            # On network or auth failure, fall back gracefully
+        except Exception:
             res = self._fallback.generate(messages, system_prompt, temperature, max_tokens)
             res.duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
             return res
+
+    async def stream_generate(
+        self,
+        messages: List[Dict[str, str]],
+        system_prompt: Optional[str] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 150,
+    ) -> AsyncIterator[LLMChunk]:
+        """
+        Streams token deltas directly from OpenAI/Groq API with stream=True.
+        """
+        if not self._client:
+            async for chunk in self._fallback.stream_generate(
+                messages, system_prompt, temperature, max_tokens
+            ):
+                yield chunk
+            return
+
+        start_time = time.perf_counter()
+        full_messages = []
+        sys = system_prompt or DEFAULT_SYSTEM_PROMPT
+        full_messages.append({"role": "system", "content": sys})
+
+        for m in messages:
+            if m.get("role") in ("user", "assistant"):
+                full_messages.append({"role": m["role"], "content": m["content"]})
+
+        try:
+            loop = asyncio.get_event_loop()
+            # Run stream invocation in executor to keep loop responsive
+            stream = await loop.run_in_executor(
+                None,
+                lambda: self._client.chat.completions.create(
+                    model=self.model,
+                    messages=full_messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=True,
+                ),
+            )
+
+            accumulated = []
+            is_first = True
+
+            for part in stream:
+                delta = part.choices[0].delta.content or ""
+                if not delta:
+                    continue
+                accumulated.append(delta)
+                duration = (time.perf_counter() - start_time) * 1000
+
+                yield LLMChunk(
+                    delta=delta,
+                    accumulated_text="".join(accumulated),
+                    is_first_token=is_first,
+                    is_final=False,
+                    duration_ms=round(duration, 2),
+                )
+                is_first = False
+                await asyncio.sleep(0.001)
+
+            # Final marker
+            yield LLMChunk(
+                delta="",
+                accumulated_text="".join(accumulated),
+                is_first_token=False,
+                is_final=True,
+                duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+            )
+
+        except Exception:
+            async for chunk in self._fallback.stream_generate(
+                messages, system_prompt, temperature, max_tokens
+            ):
+                yield chunk
 
 
 class OllamaLLM(BaseLLM):
@@ -172,3 +286,16 @@ class OllamaLLM(BaseLLM):
             pass
 
         return self._fallback.generate(messages, system_prompt, temperature, max_tokens)
+
+    async def stream_generate(
+        self,
+        messages: List[Dict[str, str]],
+        system_prompt: Optional[str] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 150,
+    ) -> AsyncIterator[LLMChunk]:
+        """Streaming adapter with fallback."""
+        async for chunk in self._fallback.stream_generate(
+            messages, system_prompt, temperature, max_tokens
+        ):
+            yield chunk

@@ -133,6 +133,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 className="w-4 h-4 accent-indigo-500 rounded cursor-pointer"
               />
             </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="font-medium text-cyan-300">Debug / Latency Inspector</p>
+                <p className="text-[11px] text-slate-500">
+                  Display real-time TTFT, TTFA, and turn latency telemetry (Phase 4)
+                </p>
+              </div>
+              <input
+                id="settings-debug-mode-toggle"
+                type="checkbox"
+                checked={settings.debugMode ?? true}
+                onChange={(e) =>
+                  onUpdateSettings({ debugMode: e.target.checked })
+                }
+                className="w-4 h-4 accent-cyan-500 rounded cursor-pointer"
+              />
+            </div>
           </div>
         </div>
 

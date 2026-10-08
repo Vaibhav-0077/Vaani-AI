@@ -10,6 +10,15 @@ export interface TokenResponse {
   expiresIn?: string;
 }
 
+export interface LatencyMetrics {
+  speechDurationMs?: number;
+  sttLatencyMs?: number;
+  ttftMs?: number; // Time-to-First-Token
+  ttfaMs?: number; // Time-to-First-Audio
+  ttsDurationMs?: number;
+  totalTurnMs?: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system';
@@ -18,6 +27,8 @@ export interface ChatMessage {
   isInterim?: boolean;
   language?: 'en' | 'hi' | 'hinglish';
   latencyMs?: number;
+  latencyMetrics?: LatencyMetrics;
+  interrupted?: boolean;
 }
 
 export interface AgentSettings {
@@ -25,6 +36,7 @@ export interface AgentSettings {
   speechRate: number;
   continuousMode: boolean;
   autoScroll: boolean;
+  debugMode?: boolean; // Toggles real-time latency inspection panel
   selectedMicrophoneId?: string;
 }
 
