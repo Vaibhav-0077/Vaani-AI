@@ -82,6 +82,48 @@ function generateAssistantResponse(text: string, language: string = 'en-US'): st
   return `I heard you say: "${text}". I am listening and ready to help. What would you like to explore next?`;
 }
 
+/**
+ * Detects whether a transcribed user utterance is an acoustic echo
+ * of what the assistant just spoke through the device speakers.
+ */
+function isAcousticEcho(userInput: string, assistantResponses: string[]): boolean {
+  if (!userInput.trim()) return false;
+  const userWords = userInput
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .split(/\s+/)
+    .filter((w) => w.length > 2);
+
+  if (userWords.length === 0) return false;
+
+  for (const resp of assistantResponses) {
+    if (!resp) continue;
+    const respWords = new Set(
+      resp
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, '')
+        .split(/\s+/)
+        .filter((w) => w.length > 2)
+    );
+
+    let matchCount = 0;
+    for (const w of userWords) {
+      if (respWords.has(w)) {
+        matchCount++;
+      }
+    }
+
+    const matchRatio = matchCount / userWords.length;
+    // If >= 40% of words match the assistant's previous utterance (with at least 2 matching words),
+    // or >= 4 common words match, it's 100% an echo of the assistant's voice!
+    if ((matchRatio >= 0.4 && matchCount >= 2) || matchCount >= 4) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export function useVoiceSession() {
   const [voiceState, setVoiceState] = useState<VoiceState>('IDLE');
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('DISCONNECTED');
@@ -121,6 +163,8 @@ export function useVoiceSession() {
   const connectionStatusRef = useRef<ConnectionStatus>('DISCONNECTED');
   const isMutedRef = useRef<boolean>(false);
   const isAssistantSpeakingRef = useRef<boolean>(false);
+  const recentAssistantTextsRef = useRef<string[]>([]);
+  const lastAssistantFinishTimeRef = useRef<number>(0);
 
   // Keep refs in sync for asynchronous handlers
   useEffect(() => {
@@ -180,7 +224,11 @@ export function useVoiceSession() {
       try {
         window.speechSynthesis.cancel();
 
-        // 1. Mark assistant as speaking to block microphone self-transcription
+        // 1. Record text in recent assistant utterances and mark assistant as speaking
+        recentAssistantTextsRef.current = [
+          ...recentAssistantTextsRef.current.slice(-4),
+          text,
+        ];
         isAssistantSpeakingRef.current = true;
 
         const utterance = new SpeechSynthesisUtterance(text);
@@ -207,16 +255,17 @@ export function useVoiceSession() {
         };
 
         const finishSpeaking = () => {
+          lastAssistantFinishTimeRef.current = Date.now();
           speechSynthUtteranceRef.current = null;
           if (voiceStateRef.current === 'SPEAKING') {
             setVoiceState('LISTENING');
           }
           if (onDone) onDone();
 
-          // 300ms acoustic reverb buffer before re-enabling microphone listening
+          // 500ms acoustic buffer before re-enabling microphone listening
           setTimeout(() => {
             isAssistantSpeakingRef.current = false;
-          }, 300);
+          }, 500);
         };
 
         utterance.onend = finishSpeaking;
@@ -661,16 +710,30 @@ export function useVoiceSession() {
 
           const currentText = (final || interim).trim();
           if (currentText) {
+            // Check if this audio is an echo of the assistant's previous speech
+            const timeSinceSpoke = Date.now() - lastAssistantFinishTimeRef.current;
+            if (timeSinceSpoke < 4500 && isAcousticEcho(currentText, recentAssistantTextsRef.current)) {
+              console.log('[Echo Filter] Discarded speaker echo:', currentText);
+              accumulatedText = '';
+              setInterimTranscript('');
+              return;
+            }
+
             accumulatedText = currentText;
             setInterimTranscript(currentText);
 
             // Turn Detection Endpointing: If user pauses speaking for 1.1s, finalize and send!
             clearTimeout(silenceTimer);
             silenceTimer = setTimeout(() => {
-              if (accumulatedText.trim() && !isAssistantSpeakingRef.current && voiceStateRef.current !== 'SPEAKING') {
-                const textToSend = accumulatedText.trim();
-                accumulatedText = '';
-                setInterimTranscript('');
+              const textToSend = accumulatedText.trim();
+              accumulatedText = '';
+              setInterimTranscript('');
+
+              if (textToSend && !isAssistantSpeakingRef.current && voiceStateRef.current !== 'SPEAKING') {
+                if (Date.now() - lastAssistantFinishTimeRef.current < 4500 && isAcousticEcho(textToSend, recentAssistantTextsRef.current)) {
+                  console.log('[Echo Filter] Discarded timeout echo:', textToSend);
+                  return;
+                }
                 sendMessage(textToSend);
               }
             }, 1100);
@@ -681,6 +744,12 @@ export function useVoiceSession() {
             const textToSend = final.trim();
             accumulatedText = '';
             setInterimTranscript('');
+
+            if (Date.now() - lastAssistantFinishTimeRef.current < 4500 && isAcousticEcho(textToSend, recentAssistantTextsRef.current)) {
+              console.log('[Echo Filter] Discarded final echo:', textToSend);
+              return;
+            }
+
             sendMessage(textToSend);
           }
         };
