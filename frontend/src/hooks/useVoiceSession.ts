@@ -183,13 +183,6 @@ export function useVoiceSession() {
         // 1. Mark assistant as speaking to block microphone self-transcription
         isAssistantSpeakingRef.current = true;
 
-        // 2. Temporarily pause browser SpeechRecognition so speakers don't feed into mic
-        if (speechRecognitionRef.current) {
-          try {
-            speechRecognitionRef.current.abort();
-          } catch {}
-        }
-
         const utterance = new SpeechSynthesisUtterance(text);
         speechSynthUtteranceRef.current = utterance;
         utterance.rate = settings.speechRate || 1.0;
@@ -220,15 +213,10 @@ export function useVoiceSession() {
           }
           if (onDone) onDone();
 
-          // 400ms acoustic reverb buffer before re-enabling microphone listening
+          // 300ms acoustic reverb buffer before re-enabling microphone listening
           setTimeout(() => {
             isAssistantSpeakingRef.current = false;
-            if (connectionStatusRef.current === 'CONNECTED' && !isMutedRef.current) {
-              try {
-                speechRecognitionRef.current?.start();
-              } catch {}
-            }
-          }, 400);
+          }, 300);
         };
 
         utterance.onend = finishSpeaking;
@@ -628,14 +616,23 @@ export function useVoiceSession() {
     }
   }, [cleanup, addSystemMessage, interrupt, settings.language, speakText]);
 
-  // Realtime browser Speech Recognition when connected
+  // Continuous Speech Recognition manager with Silence Turn Detection
   useEffect(() => {
     const SpeechRecognitionClass =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
     if (!SpeechRecognitionClass) return;
 
-    if (connectionStatus === 'CONNECTED' && !isMuted) {
+    let activeRecognition: any = null;
+    let isStoppedExplicitly = false;
+    let silenceTimer: any = null;
+    let accumulatedText = '';
+
+    const startListener = () => {
+      if (isStoppedExplicitly || connectionStatusRef.current !== 'CONNECTED' || isMutedRef.current) {
+        return;
+      }
+
       try {
         const recognition = new SpeechRecognitionClass();
         recognition.continuous = true;
@@ -645,6 +642,8 @@ export function useVoiceSession() {
         recognition.onresult = (event: any) => {
           // Acoustic Echo Gate: Discard if assistant is actively speaking or in cooldown!
           if (isAssistantSpeakingRef.current || voiceStateRef.current === 'SPEAKING') {
+            accumulatedText = '';
+            setInterimTranscript('');
             return;
           }
 
@@ -660,13 +659,29 @@ export function useVoiceSession() {
             }
           }
 
-          if (interim) {
-            setInterimTranscript(interim);
+          const currentText = (final || interim).trim();
+          if (currentText) {
+            accumulatedText = currentText;
+            setInterimTranscript(currentText);
+
+            // Turn Detection Endpointing: If user pauses speaking for 1.1s, finalize and send!
+            clearTimeout(silenceTimer);
+            silenceTimer = setTimeout(() => {
+              if (accumulatedText.trim() && !isAssistantSpeakingRef.current && voiceStateRef.current !== 'SPEAKING') {
+                const textToSend = accumulatedText.trim();
+                accumulatedText = '';
+                setInterimTranscript('');
+                sendMessage(textToSend);
+              }
+            }, 1100);
           }
 
           if (final.trim()) {
+            clearTimeout(silenceTimer);
+            const textToSend = final.trim();
+            accumulatedText = '';
             setInterimTranscript('');
-            sendMessage(final.trim());
+            sendMessage(textToSend);
           }
         };
 
@@ -677,39 +692,47 @@ export function useVoiceSession() {
         };
 
         recognition.onend = () => {
-          // Only restart if assistant is not speaking and still connected
-          if (
-            connectionStatusRef.current === 'CONNECTED' &&
-            !isMutedRef.current &&
-            !isAssistantSpeakingRef.current
-          ) {
-            try {
-              recognition.start();
-            } catch {}
+          activeRecognition = null;
+          // Chrome stops recognition on silence. Auto-restart immediately so mic stays alive!
+          if (!isStoppedExplicitly && connectionStatusRef.current === 'CONNECTED' && !isMutedRef.current) {
+            setTimeout(() => {
+              if (!isStoppedExplicitly && connectionStatusRef.current === 'CONNECTED') {
+                startListener();
+              }
+            }, 100);
           }
         };
 
         recognition.start();
+        activeRecognition = recognition;
         speechRecognitionRef.current = recognition;
-
-        return () => {
-          try {
-            recognition.stop();
-          } catch {}
-          speechRecognitionRef.current = null;
-        };
       } catch (err) {
-        console.warn('[SpeechRecognition Setup Error]', err);
+        console.warn('[SpeechRecognition Start Failed]', err);
+        setTimeout(() => {
+          if (!isStoppedExplicitly && connectionStatusRef.current === 'CONNECTED') {
+            startListener();
+          }
+        }, 400);
       }
-    } else {
-      if (speechRecognitionRef.current) {
-        try {
-          speechRecognitionRef.current.stop();
-        } catch {}
-        speechRecognitionRef.current = null;
-      }
+    };
+
+    if (connectionStatus === 'CONNECTED' && !isMuted) {
+      isStoppedExplicitly = false;
+      startListener();
     }
-  }, [connectionStatus, isMuted, settings.language, sendMessage, interrupt]);
+
+    return () => {
+      isStoppedExplicitly = true;
+      clearTimeout(silenceTimer);
+      if (activeRecognition) {
+        try {
+          activeRecognition.stop();
+        } catch {}
+        activeRecognition = null;
+      }
+      speechRecognitionRef.current = null;
+    };
+  }, [connectionStatus, isMuted, settings.language, sendMessage]);
 
   // Toggle connection handler
   const toggleConnection = useCallback(() => {
