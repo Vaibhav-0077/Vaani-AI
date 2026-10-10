@@ -120,6 +120,7 @@ export function useVoiceSession() {
   const voiceStateRef = useRef<VoiceState>('IDLE');
   const connectionStatusRef = useRef<ConnectionStatus>('DISCONNECTED');
   const isMutedRef = useRef<boolean>(false);
+  const isAssistantSpeakingRef = useRef<boolean>(false);
 
   // Keep refs in sync for asynchronous handlers
   useEffect(() => {
@@ -146,6 +147,7 @@ export function useVoiceSession() {
 
   // Stop all actively playing audio elements & speech synthesis
   const stopPlaybackAudio = useCallback(() => {
+    isAssistantSpeakingRef.current = false;
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       try {
         window.speechSynthesis.cancel();
@@ -167,7 +169,7 @@ export function useVoiceSession() {
     activeAudioElementsRef.current = [];
   }, []);
 
-  // Browser TTS Voice Playback helper
+  // Browser TTS Voice Playback helper with Acoustic Echo Gate
   const speakText = useCallback(
     (text: string, onDone?: () => void) => {
       if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
@@ -177,6 +179,16 @@ export function useVoiceSession() {
 
       try {
         window.speechSynthesis.cancel();
+
+        // 1. Mark assistant as speaking to block microphone self-transcription
+        isAssistantSpeakingRef.current = true;
+
+        // 2. Temporarily pause browser SpeechRecognition so speakers don't feed into mic
+        if (speechRecognitionRef.current) {
+          try {
+            speechRecognitionRef.current.abort();
+          } catch {}
+        }
 
         const utterance = new SpeechSynthesisUtterance(text);
         speechSynthUtteranceRef.current = utterance;
@@ -197,31 +209,41 @@ export function useVoiceSession() {
         }
 
         utterance.onstart = () => {
+          isAssistantSpeakingRef.current = true;
           setVoiceState('SPEAKING');
         };
 
-        utterance.onend = () => {
+        const finishSpeaking = () => {
           speechSynthUtteranceRef.current = null;
           if (voiceStateRef.current === 'SPEAKING') {
             setVoiceState('LISTENING');
           }
           if (onDone) onDone();
+
+          // 400ms acoustic reverb buffer before re-enabling microphone listening
+          setTimeout(() => {
+            isAssistantSpeakingRef.current = false;
+            if (connectionStatusRef.current === 'CONNECTED' && !isMutedRef.current) {
+              try {
+                speechRecognitionRef.current?.start();
+              } catch {}
+            }
+          }, 400);
         };
 
+        utterance.onend = finishSpeaking;
+
         utterance.onerror = (e) => {
-          speechSynthUtteranceRef.current = null;
           if (e.error !== 'canceled' && e.error !== 'interrupted') {
             console.warn('[SpeechSynthesis Error]', e);
           }
-          if (voiceStateRef.current === 'SPEAKING') {
-            setVoiceState('LISTENING');
-          }
-          if (onDone) onDone();
+          finishSpeaking();
         };
 
         window.speechSynthesis.speak(utterance);
       } catch (err) {
         console.warn('[SpeechSynthesis Speak Failed]', err);
+        isAssistantSpeakingRef.current = false;
         if (voiceStateRef.current === 'SPEAKING') {
           setVoiceState('LISTENING');
         }
@@ -235,6 +257,7 @@ export function useVoiceSession() {
   const interrupt = useCallback(() => {
     if (voiceStateRef.current === 'SPEAKING' || voiceStateRef.current === 'THINKING') {
       stopPlaybackAudio();
+      isAssistantSpeakingRef.current = false;
 
       // Send interruption signal via LiveKit DataChannel to agent
       if (roomRef.current?.localParticipant) {
@@ -261,6 +284,16 @@ export function useVoiceSession() {
       });
 
       addSystemMessage('Barge-in triggered: Assistant response stopped.');
+
+      // Re-enable SpeechRecognition after interruption
+      setTimeout(() => {
+        if (connectionStatusRef.current === 'CONNECTED' && !isMutedRef.current) {
+          try {
+            speechRecognitionRef.current?.start();
+          } catch {}
+        }
+      }, 300);
+
       return true;
     }
     return false;
@@ -565,10 +598,10 @@ export function useVoiceSession() {
             const normalized = Math.min(1.0, Math.max(0, (avg - 8) / 60));
             setAudioLevel(normalized);
 
-            // Phase 4 Barge-in check: If user speaks during assistant speaking state, interrupt!
-            if (normalized > 0.25) {
+            // Phase 4 Barge-in check: Higher volume threshold (> 0.65) to prevent computer speakers from interrupting themselves
+            if (normalized > 0.65) {
               userSpeechFrames += 1;
-              if (userSpeechFrames >= 3 && voiceStateRef.current === 'SPEAKING') {
+              if (userSpeechFrames >= 6 && voiceStateRef.current === 'SPEAKING') {
                 interrupt();
                 userSpeechFrames = 0;
               }
@@ -610,9 +643,9 @@ export function useVoiceSession() {
         recognition.lang = settings.language === 'hi-IN' ? 'hi-IN' : 'en-US';
 
         recognition.onresult = (event: any) => {
-          // If assistant is actively speaking, user speech triggers barge-in
-          if (voiceStateRef.current === 'SPEAKING') {
-            interrupt();
+          // Acoustic Echo Gate: Discard if assistant is actively speaking or in cooldown!
+          if (isAssistantSpeakingRef.current || voiceStateRef.current === 'SPEAKING') {
+            return;
           }
 
           let interim = '';
@@ -644,7 +677,12 @@ export function useVoiceSession() {
         };
 
         recognition.onend = () => {
-          if (connectionStatusRef.current === 'CONNECTED' && !isMutedRef.current) {
+          // Only restart if assistant is not speaking and still connected
+          if (
+            connectionStatusRef.current === 'CONNECTED' &&
+            !isMutedRef.current &&
+            !isAssistantSpeakingRef.current
+          ) {
             try {
               recognition.start();
             } catch {}
