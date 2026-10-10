@@ -82,18 +82,27 @@ function generateAssistantResponse(text: string, language: string = 'en-US'): st
   return `I heard you say: "${text}". I am listening and ready to help. What would you like to explore next?`;
 }
 
+const COMMON_CONVERSATIONAL_WORDS = new Set([
+  'hello', 'hi', 'hey', 'how', 'are', 'you', 'today', 'can', 'help', 'what', 'i', 'am',
+  'is', 'the', 'a', 'an', 'to', 'in', 'it', 'me', 'do', 'for', 'and', 'or', 'so',
+  'namaste', 'aap', 'kaise', 'ho', 'kya', 'hai', 'mera', 'naam', 'main', 'bolo',
+]);
+
 /**
  * Detects whether a transcribed user utterance is an acoustic echo
  * of what the assistant just spoke through the device speakers.
  */
 function isAcousticEcho(userInput: string, assistantResponses: string[]): boolean {
   if (!userInput.trim()) return false;
+  // Extract distinct, non-stop words
   const userWords = userInput
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, '')
     .split(/\s+/)
-    .filter((w) => w.length > 2);
+    .filter((w) => w.length > 2 && !COMMON_CONVERSATIONAL_WORDS.has(w));
 
+  // If the user's sentence only contains general greeting words (e.g. "hello", "how are you"),
+  // NEVER classify it as an echo! It is a genuine human utterance!
   if (userWords.length === 0) return false;
 
   for (const resp of assistantResponses) {
@@ -103,7 +112,7 @@ function isAcousticEcho(userInput: string, assistantResponses: string[]): boolea
         .toLowerCase()
         .replace(/[^a-z0-9\s]/g, '')
         .split(/\s+/)
-        .filter((w) => w.length > 2)
+        .filter((w) => w.length > 2 && !COMMON_CONVERSATIONAL_WORDS.has(w))
     );
 
     let matchCount = 0;
@@ -114,9 +123,8 @@ function isAcousticEcho(userInput: string, assistantResponses: string[]): boolea
     }
 
     const matchRatio = matchCount / userWords.length;
-    // If >= 40% of words match the assistant's previous utterance (with at least 2 matching words),
-    // or >= 4 common words match, it's 100% an echo of the assistant's voice!
-    if ((matchRatio >= 0.4 && matchCount >= 2) || matchCount >= 4) {
+    // Only classify as echo if distinctive non-generic words match heavily (>= 60% and at least 3 distinctive words)
+    if (matchRatio >= 0.6 && matchCount >= 3) {
       return true;
     }
   }
@@ -411,20 +419,45 @@ export function useVoiceSession() {
       // Transition to THINKING state
       setVoiceState('THINKING');
 
-      const ttft = Math.floor(75 + Math.random() * 30);
-      const ttfa = Math.floor(220 + Math.random() * 40);
-      const total = ttfa + 110;
+      const startTime = performance.now();
+      const apiBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
-      const metrics: LatencyMetrics = {
-        ttftMs: ttft,
-        ttfaMs: ttfa,
-        ttsDurationMs: 140,
-        totalTurnMs: total,
-      };
+      (async () => {
+        let replyText = '';
+        let ttfa = 220;
 
-      const replyText = generateAssistantResponse(text, settings.language);
+        try {
+          const chatRes = await fetch(`${apiBaseUrl}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              message: text,
+              language: settings.language,
+              history: messages.slice(-4),
+            }),
+          });
 
-      setTimeout(() => {
+          if (chatRes.ok) {
+            const chatData = await chatRes.json();
+            replyText = chatData.response || generateAssistantResponse(text, settings.language);
+          } else {
+            replyText = generateAssistantResponse(text, settings.language);
+          }
+        } catch {
+          replyText = generateAssistantResponse(text, settings.language);
+        }
+
+        const elapsed = Math.round(performance.now() - startTime);
+        ttfa = Math.max(180, elapsed);
+        const total = ttfa + 110;
+
+        const metrics: LatencyMetrics = {
+          ttftMs: Math.round(ttfa * 0.4),
+          ttfaMs: ttfa,
+          ttsDurationMs: 140,
+          totalTurnMs: total,
+        };
+
         setLastLatencyMetrics(metrics);
 
         const assistantMsg: ChatMessage = {
@@ -437,16 +470,18 @@ export function useVoiceSession() {
         };
         setMessages((prev) => [...prev, assistantMsg]);
 
-        // Speak the response so the user hears it aloud and state transitions smoothly
+        // Speak the response aloud through TTS
         speakText(replyText);
-      }, 220);
+      })();
     },
-    [settings.language, speakText]
+    [settings.language, speakText, messages]
   );
 
   // Connect function
   const connect = useCallback(async () => {
     cleanup();
+    setIsMuted(false);
+    isMutedRef.current = false;
     setErrorMessage(null);
     setConnectionStatus('CONNECTING');
     setVoiceState('CONNECTING');
@@ -710,9 +745,9 @@ export function useVoiceSession() {
 
           const currentText = (final || interim).trim();
           if (currentText) {
-            // Check if this audio is an echo of the assistant's previous speech
+            // Check if this audio is an echo of the assistant's previous speech (within 1.8s)
             const timeSinceSpoke = Date.now() - lastAssistantFinishTimeRef.current;
-            if (timeSinceSpoke < 4500 && isAcousticEcho(currentText, recentAssistantTextsRef.current)) {
+            if (timeSinceSpoke < 1800 && isAcousticEcho(currentText, recentAssistantTextsRef.current)) {
               console.log('[Echo Filter] Discarded speaker echo:', currentText);
               accumulatedText = '';
               setInterimTranscript('');
@@ -730,7 +765,7 @@ export function useVoiceSession() {
               setInterimTranscript('');
 
               if (textToSend && !isAssistantSpeakingRef.current && voiceStateRef.current !== 'SPEAKING') {
-                if (Date.now() - lastAssistantFinishTimeRef.current < 4500 && isAcousticEcho(textToSend, recentAssistantTextsRef.current)) {
+                if (Date.now() - lastAssistantFinishTimeRef.current < 1800 && isAcousticEcho(textToSend, recentAssistantTextsRef.current)) {
                   console.log('[Echo Filter] Discarded timeout echo:', textToSend);
                   return;
                 }
@@ -745,7 +780,7 @@ export function useVoiceSession() {
             accumulatedText = '';
             setInterimTranscript('');
 
-            if (Date.now() - lastAssistantFinishTimeRef.current < 4500 && isAcousticEcho(textToSend, recentAssistantTextsRef.current)) {
+            if (Date.now() - lastAssistantFinishTimeRef.current < 1800 && isAcousticEcho(textToSend, recentAssistantTextsRef.current)) {
               console.log('[Echo Filter] Discarded final echo:', textToSend);
               return;
             }

@@ -100,6 +100,79 @@ app.post('/api/token', async (req, res) => {
   }
 });
 
+// 4. Realtime Conversational Chat & LLM Generation endpoint
+app.post('/api/chat', async (req, res) => {
+  try {
+    const { message, language = 'en-US', history = [] } = req.body;
+    if (!message || typeof message !== 'string') {
+      return res.status(400).json({ error: 'Message is required' });
+    }
+
+    const groqKey = process.env.GROQ_API_KEY;
+    const model = process.env.LLM_MODEL || 'openai/gpt-oss-20b';
+
+    const systemPrompt = `You are Vaani AI, an ultra-low-latency, friendly conversational voice assistant supporting English, Hindi, and Hinglish.
+Give concise, helpful answers (1 to 2 short sentences max) that sound natural when spoken aloud.
+Never use markdown, asterisks, bullet points, numbered lists, or emojis.
+Respond in the language or mix of English/Hindi matching the user.`;
+
+    if (groqKey && !groqKey.includes('your_groq_api_key')) {
+      try {
+        const messages = [
+          { role: 'system', content: systemPrompt },
+          ...history.slice(-4).map((h) => ({
+            role: h.role === 'user' ? 'user' : 'assistant',
+            content: h.content,
+          })),
+          { role: 'user', content: message.trim() },
+        ];
+
+        const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${groqKey.trim()}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model,
+            messages,
+            max_tokens: 150,
+            temperature: 0.6,
+          }),
+        });
+
+        if (groqRes.ok) {
+          const groqData = await groqRes.json();
+          let reply = groqData.choices?.[0]?.message?.content?.trim();
+          if (reply) {
+            // Strip any markdown symbols like asterisks or hashtags so TTS sounds clean
+            reply = reply.replace(/[*_#`~]/g, '').trim();
+            return res.json({
+              response: reply,
+              provider: 'groq',
+              model,
+            });
+          }
+        } else {
+          const errText = await groqRes.text().catch(() => '');
+          console.warn('[Groq API Call Warning]', groqRes.status, errText);
+        }
+      } catch (groqErr) {
+        console.warn('[Groq Fetch Failed]', groqErr.message);
+      }
+    }
+
+    // Contextual fallback response
+    return res.json({
+      response: `I heard you say: "${message}". I am listening and ready to help. What would you like to explore next?`,
+      provider: 'fallback',
+    });
+  } catch (err) {
+    console.error('[Chat API Error]', err);
+    return res.status(500).json({ error: 'Failed to process chat', message: err.message });
+  }
+});
+
 // Global error handler
 app.use((err, req, res, next) => {
   console.error('[Unhandled Server Error]', err);
