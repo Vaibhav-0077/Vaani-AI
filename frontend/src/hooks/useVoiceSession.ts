@@ -4,7 +4,6 @@ import {
   RoomEvent,
   Track,
   LocalAudioTrack,
-  createLocalAudioTrack,
 } from 'livekit-client';
 import type {
   VoiceState,
@@ -173,8 +172,13 @@ export function useVoiceSession() {
   const isAssistantSpeakingRef = useRef<boolean>(false);
   const recentAssistantTextsRef = useRef<string[]>([]);
   const lastAssistantFinishTimeRef = useRef<number>(0);
+  const messagesRef = useRef<ChatMessage[]>([]);
 
   // Keep refs in sync for asynchronous handlers
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
   useEffect(() => {
     voiceStateRef.current = voiceState;
   }, [voiceState]);
@@ -329,16 +333,6 @@ export function useVoiceSession() {
       });
 
       addSystemMessage('Barge-in triggered: Assistant response stopped.');
-
-      // Re-enable SpeechRecognition after interruption
-      setTimeout(() => {
-        if (connectionStatusRef.current === 'CONNECTED' && !isMutedRef.current) {
-          try {
-            speechRecognitionRef.current?.start();
-          } catch {}
-        }
-      }, 300);
-
       return true;
     }
     return false;
@@ -433,7 +427,7 @@ export function useVoiceSession() {
             body: JSON.stringify({
               message: text,
               language: settings.language,
-              history: messages.slice(-4),
+              history: messagesRef.current.slice(-4),
             }),
           });
 
@@ -474,7 +468,7 @@ export function useVoiceSession() {
         speakText(replyText);
       })();
     },
-    [settings.language, speakText, messages]
+    [settings.language, speakText]
   );
 
   // Connect function
@@ -486,34 +480,7 @@ export function useVoiceSession() {
     setConnectionStatus('CONNECTING');
     setVoiceState('CONNECTING');
 
-    // 1. Microphone permission handling & Local Audio Track creation
-    let localTrack: LocalAudioTrack;
-    try {
-      localTrack = await createLocalAudioTrack({
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      });
-      audioTrackRef.current = localTrack;
-      setIsMicAllowed(true);
-    } catch (micErr: any) {
-      console.error('[Microphone Permission Error]', micErr);
-      setIsMicAllowed(false);
-      setConnectionStatus('ERROR');
-      setVoiceState('ERROR');
-      const isDenied =
-        micErr.name === 'NotAllowedError' ||
-        micErr.name === 'PermissionDeniedError' ||
-        micErr.message?.toLowerCase().includes('denied');
-      const errText = isDenied
-        ? 'Microphone permission was denied. Please allow microphone access in your browser settings.'
-        : `Microphone device error: ${micErr.message || 'Unable to access audio input'}`;
-      setErrorMessage(errText);
-      addSystemMessage(errText);
-      return;
-    }
-
-    // 2. Request ephemeral token from Node.js backend
+    // 1. Request ephemeral token from Node.js backend
     const apiBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
     let tokenData: TokenResponse;
 
@@ -535,8 +502,6 @@ export function useVoiceSession() {
       tokenData = await res.json();
     } catch (tokenErr: any) {
       console.error('[Backend Token Error]', tokenErr);
-      localTrack.stop();
-      audioTrackRef.current = null;
       setConnectionStatus('ERROR');
       setVoiceState('ERROR');
       const errText = `Backend token error: ${tokenErr.message}. Ensure backend is running (npm run dev:backend) and LiveKit credentials are set in .env.`;
@@ -545,7 +510,7 @@ export function useVoiceSession() {
       return;
     }
 
-    // 3. Connect to LiveKit Room over WebRTC
+    // 2. Connect to LiveKit Room over WebRTC
     try {
       const room = new Room({
         adaptiveStream: true,
@@ -576,7 +541,7 @@ export function useVoiceSession() {
         };
         setMessages((prev) => [...prev, welcomeMsg]);
 
-        // Play the welcome message audio
+        // Play the welcome message audio completely
         setTimeout(() => {
           speakText(welcomeText);
         }, 200);
@@ -637,60 +602,66 @@ export function useVoiceSession() {
         }
       });
 
-      // Connect to LiveKit SFU
+      // Connect to LiveKit SFU first
       await room.connect(tokenData.serverUrl, tokenData.token);
 
-      // Publish local microphone track
-      await room.localParticipant.publishTrack(localTrack);
-
-      // 4. Web Audio API Analyser for real-time microphone metering & barge-in
+      // 3. Enable microphone via official LiveKit participant API
       try {
-        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-        if (AudioCtx) {
-          const audioCtx = new AudioCtx();
-          audioContextRef.current = audioCtx;
-          const mediaStream = new MediaStream([localTrack.mediaStreamTrack]);
-          const source = audioCtx.createMediaStreamSource(mediaStream);
-          const analyser = audioCtx.createAnalyser();
-          analyser.fftSize = 64;
-          analyser.smoothingTimeConstant = 0.5;
-          source.connect(analyser);
+        const pub = await room.localParticipant.setMicrophoneEnabled(true, {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        });
 
-          const dataArray = new Uint8Array(analyser.frequencyBinCount);
-          let userSpeechFrames = 0;
+        const localTrack = pub?.track as LocalAudioTrack | undefined;
+        if (localTrack) {
+          audioTrackRef.current = localTrack;
+          setIsMicAllowed(true);
 
-          const meterLoop = () => {
-            if (!audioTrackRef.current) return;
-            analyser.getByteFrequencyData(dataArray);
-            let sum = 0;
-            for (let i = 0; i < dataArray.length; i++) {
-              sum += dataArray[i];
-            }
-            const avg = sum / dataArray.length;
-            const normalized = Math.min(1.0, Math.max(0, (avg - 8) / 60));
-            setAudioLevel(normalized);
+          // 4. Web Audio API Analyser for real-time visualizer pulsing (without self-interruption)
+          const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+          if (AudioCtx) {
+            const audioCtx = new AudioCtx();
+            audioContextRef.current = audioCtx;
+            const mediaStream = new MediaStream([localTrack.mediaStreamTrack]);
+            const source = audioCtx.createMediaStreamSource(mediaStream);
+            const analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 64;
+            analyser.smoothingTimeConstant = 0.5;
+            source.connect(analyser);
 
-            // Phase 4 Barge-in check: Higher volume threshold (> 0.65) to prevent computer speakers from interrupting themselves
-            if (normalized > 0.65) {
-              userSpeechFrames += 1;
-              if (userSpeechFrames >= 6 && voiceStateRef.current === 'SPEAKING') {
-                interrupt();
-                userSpeechFrames = 0;
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+            const meterLoop = () => {
+              if (!audioTrackRef.current) return;
+              analyser.getByteFrequencyData(dataArray);
+              let sum = 0;
+              for (let i = 0; i < dataArray.length; i++) {
+                sum += dataArray[i];
               }
-            } else {
-              userSpeechFrames = 0;
-            }
+              const avg = sum / dataArray.length;
+              const normalized = Math.min(1.0, Math.max(0, (avg - 8) / 60));
+              setAudioLevel(normalized);
 
+              animFrameRef.current = requestAnimationFrame(meterLoop);
+            };
             animFrameRef.current = requestAnimationFrame(meterLoop);
-          };
-          animFrameRef.current = requestAnimationFrame(meterLoop);
+          }
         }
-      } catch (meterErr) {
-        console.warn('[Audio Level Metering Error]', meterErr);
+      } catch (micErr: any) {
+        console.error('[Microphone Permission Error]', micErr);
+        setIsMicAllowed(false);
+        const isDenied =
+          micErr.name === 'NotAllowedError' ||
+          micErr.name === 'PermissionDeniedError' ||
+          micErr.message?.toLowerCase().includes('denied');
+        const errText = isDenied
+          ? 'Microphone permission was denied. Please allow microphone access in your browser settings.'
+          : `Microphone device error: ${micErr.message || 'Unable to access audio input'}`;
+        addSystemMessage(errText);
       }
     } catch (connErr: any) {
       console.error('[LiveKit WebRTC Connection Error]', connErr);
-      localTrack.stop();
       cleanup();
       setConnectionStatus('ERROR');
       setVoiceState('ERROR');
@@ -698,14 +669,17 @@ export function useVoiceSession() {
       setErrorMessage(errText);
       addSystemMessage(errText);
     }
-  }, [cleanup, addSystemMessage, interrupt, settings.language, speakText]);
+  }, [cleanup, addSystemMessage, settings.language, speakText]);
 
   // Continuous Speech Recognition manager with Silence Turn Detection
   useEffect(() => {
     const SpeechRecognitionClass =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
-    if (!SpeechRecognitionClass) return;
+    if (!SpeechRecognitionClass) {
+      console.warn('[SpeechRecognition] Web Speech API not supported in this browser.');
+      return;
+    }
 
     let activeRecognition: any = null;
     let isStoppedExplicitly = false;
@@ -717,14 +691,34 @@ export function useVoiceSession() {
         return;
       }
 
+      if (activeRecognition) {
+        try {
+          activeRecognition.abort();
+        } catch {}
+        activeRecognition = null;
+      }
+
       try {
         const recognition = new SpeechRecognitionClass();
         recognition.continuous = true;
         recognition.interimResults = true;
-        recognition.lang = settings.language === 'hi-IN' ? 'hi-IN' : 'en-US';
+        recognition.maxAlternatives = 1;
+
+        if (settings.language === 'hi-IN') {
+          recognition.lang = 'hi-IN';
+        } else if (settings.language === 'en-US') {
+          recognition.lang = 'en-US';
+        } else {
+          // 'auto': 'en-IN' reliably recognises Indian English, Hinglish, and mixed conversational turns
+          recognition.lang = 'en-IN';
+        }
+
+        recognition.onstart = () => {
+          console.log('[STT] Speech recognition active and listening');
+        };
 
         recognition.onresult = (event: any) => {
-          // Acoustic Echo Gate: Discard if assistant is actively speaking or in cooldown!
+          // Acoustic Echo Gate: Discard if assistant is actively speaking
           if (isAssistantSpeakingRef.current || voiceStateRef.current === 'SPEAKING') {
             accumulatedText = '';
             setInterimTranscript('');
@@ -757,7 +751,7 @@ export function useVoiceSession() {
             accumulatedText = currentText;
             setInterimTranscript(currentText);
 
-            // Turn Detection Endpointing: If user pauses speaking for 1.1s, finalize and send!
+            // Turn Detection Endpointing: If user pauses speaking for 950ms, finalize and send!
             clearTimeout(silenceTimer);
             silenceTimer = setTimeout(() => {
               const textToSend = accumulatedText.trim();
@@ -769,9 +763,10 @@ export function useVoiceSession() {
                   console.log('[Echo Filter] Discarded timeout echo:', textToSend);
                   return;
                 }
+                console.log('[STT] Finalized user voice input (pause):', textToSend);
                 sendMessage(textToSend);
               }
-            }, 1100);
+            }, 950);
           }
 
           if (final.trim()) {
@@ -785,6 +780,7 @@ export function useVoiceSession() {
               return;
             }
 
+            console.log('[STT] Finalized user voice input (final):', textToSend);
             sendMessage(textToSend);
           }
         };
@@ -800,7 +796,7 @@ export function useVoiceSession() {
           // Chrome stops recognition on silence. Auto-restart immediately so mic stays alive!
           if (!isStoppedExplicitly && connectionStatusRef.current === 'CONNECTED' && !isMutedRef.current) {
             setTimeout(() => {
-              if (!isStoppedExplicitly && connectionStatusRef.current === 'CONNECTED') {
+              if (!isStoppedExplicitly && connectionStatusRef.current === 'CONNECTED' && !isMutedRef.current) {
                 startListener();
               }
             }, 100);
@@ -813,7 +809,7 @@ export function useVoiceSession() {
       } catch (err) {
         console.warn('[SpeechRecognition Start Failed]', err);
         setTimeout(() => {
-          if (!isStoppedExplicitly && connectionStatusRef.current === 'CONNECTED') {
+          if (!isStoppedExplicitly && connectionStatusRef.current === 'CONNECTED' && !isMutedRef.current) {
             startListener();
           }
         }, 400);
@@ -830,7 +826,7 @@ export function useVoiceSession() {
       clearTimeout(silenceTimer);
       if (activeRecognition) {
         try {
-          activeRecognition.stop();
+          activeRecognition.abort();
         } catch {}
         activeRecognition = null;
       }
@@ -849,13 +845,16 @@ export function useVoiceSession() {
 
   // Toggle mute handler
   const toggleMute = useCallback(async () => {
-    if (!audioTrackRef.current) return;
     const targetMute = !isMuted;
     try {
-      if (targetMute) {
-        await audioTrackRef.current.mute();
-      } else {
-        await audioTrackRef.current.unmute();
+      if (roomRef.current?.localParticipant) {
+        await roomRef.current.localParticipant.setMicrophoneEnabled(!targetMute);
+      } else if (audioTrackRef.current) {
+        if (targetMute) {
+          await audioTrackRef.current.mute();
+        } else {
+          await audioTrackRef.current.unmute();
+        }
       }
       setIsMuted(targetMute);
     } catch (err) {
