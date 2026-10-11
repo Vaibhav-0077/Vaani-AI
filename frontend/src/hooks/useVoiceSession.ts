@@ -174,6 +174,13 @@ export function useVoiceSession() {
   const lastAssistantFinishTimeRef = useRef<number>(0);
   const messagesRef = useRef<ChatMessage[]>([]);
 
+  // Audio capture & Whisper turn endpointing refs
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const isUserSpeakingRef = useRef<boolean>(false);
+  const speechSilenceTimerRef = useRef<any>(null);
+  const isTranscribingRef = useRef<boolean>(false);
+
   // Keep refs in sync for asynchronous handlers
   useEffect(() => {
     messagesRef.current = messages;
@@ -342,6 +349,17 @@ export function useVoiceSession() {
   const cleanup = useCallback(() => {
     stopPlaybackAudio();
 
+    if (speechSilenceTimerRef.current) {
+      clearTimeout(speechSilenceTimerRef.current);
+      speechSilenceTimerRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {}
+      mediaRecorderRef.current = null;
+    }
+
     if (speechRecognitionRef.current) {
       try {
         speechRecognitionRef.current.stop();
@@ -469,6 +487,59 @@ export function useVoiceSession() {
       })();
     },
     [settings.language, speakText]
+  );
+
+  // High-accuracy server-side audio transcription via Groq Whisper Large v3 Turbo & Deepgram
+  const transcribeAudioBlob = useCallback(
+    async (audioBlob: Blob) => {
+      if (audioBlob.size < 500 || isTranscribingRef.current) return;
+      isTranscribingRef.current = true;
+      const apiBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+
+      try {
+        setInterimTranscript('Transcribing speech with Whisper...');
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+          const base64Data = reader.result as string;
+          try {
+            const res = await fetch(`${apiBaseUrl}/api/transcribe`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                audio: base64Data,
+                mimeType: audioBlob.type || 'audio/webm',
+                language: settings.language,
+              }),
+            });
+
+            if (res.ok) {
+              const data = await res.json();
+              const transcript = (data.transcript || '').trim();
+              if (transcript) {
+                console.log('[Whisper Transcribed]:', transcript);
+                setInterimTranscript('');
+                sendMessage(transcript);
+              } else {
+                setInterimTranscript('');
+              }
+            } else {
+              setInterimTranscript('');
+            }
+          } catch (err) {
+            console.warn('[Transcription API Error]', err);
+            setInterimTranscript('');
+          } finally {
+            isTranscribingRef.current = false;
+          }
+        };
+        reader.readAsDataURL(audioBlob);
+      } catch (err) {
+        console.warn('[FileReader Error]', err);
+        setInterimTranscript('');
+        isTranscribingRef.current = false;
+      }
+    },
+    [settings.language, sendMessage]
   );
 
   // Connect function
@@ -618,7 +689,42 @@ export function useVoiceSession() {
           audioTrackRef.current = localTrack;
           setIsMicAllowed(true);
 
-          // 4. Web Audio API Analyser for real-time visualizer pulsing (without self-interruption)
+          // 4. Initialize MediaRecorder for Whisper Turn Detection & Audio Capture
+          try {
+            const stream = new MediaStream([localTrack.mediaStreamTrack]);
+            let mimeType = 'audio/webm';
+            if (typeof MediaRecorder !== 'undefined') {
+              if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+                mimeType = 'audio/webm;codecs=opus';
+              } else if (MediaRecorder.isTypeSupported('audio/webm')) {
+                mimeType = 'audio/webm';
+              } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+                mimeType = 'audio/mp4';
+              }
+
+              const mr = new MediaRecorder(stream, { mimeType });
+              mediaRecorderRef.current = mr;
+
+              mr.ondataavailable = (e) => {
+                if (e.data && e.data.size > 0) {
+                  audioChunksRef.current.push(e.data);
+                }
+              };
+
+              mr.onstop = () => {
+                const chunks = [...audioChunksRef.current];
+                audioChunksRef.current = [];
+                if (chunks.length > 0) {
+                  const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
+                  transcribeAudioBlob(blob);
+                }
+              };
+            }
+          } catch (mrErr) {
+            console.warn('[MediaRecorder Init Warning]', mrErr);
+          }
+
+          // 5. Web Audio API Analyser for real-time visualizer pulsing & VAD turn detection
           const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
           if (AudioCtx) {
             const audioCtx = new AudioCtx();
@@ -642,6 +748,46 @@ export function useVoiceSession() {
               const avg = sum / dataArray.length;
               const normalized = Math.min(1.0, Math.max(0, (avg - 8) / 60));
               setAudioLevel(normalized);
+
+              // Voice Activity Detection (VAD) for automatic user voice turn endpointing
+              if (
+                voiceStateRef.current === 'LISTENING' &&
+                !isAssistantSpeakingRef.current &&
+                !isMutedRef.current &&
+                mediaRecorderRef.current
+              ) {
+                const mr = mediaRecorderRef.current;
+                if (normalized > 0.07) {
+                  // User started speaking into microphone
+                  if (!isUserSpeakingRef.current) {
+                    isUserSpeakingRef.current = true;
+                    audioChunksRef.current = [];
+                    if (mr.state === 'inactive') {
+                      try {
+                        mr.start(120);
+                      } catch {}
+                    }
+                    setInterimTranscript('Listening to your voice...');
+                  }
+                  if (speechSilenceTimerRef.current) {
+                    clearTimeout(speechSilenceTimerRef.current);
+                    speechSilenceTimerRef.current = null;
+                  }
+                } else if (isUserSpeakingRef.current) {
+                  // User paused speaking -> wait 800ms silence endpointing to finalize turn
+                  if (!speechSilenceTimerRef.current) {
+                    speechSilenceTimerRef.current = setTimeout(() => {
+                      isUserSpeakingRef.current = false;
+                      speechSilenceTimerRef.current = null;
+                      if (mr.state === 'recording') {
+                        try {
+                          mr.stop();
+                        } catch {}
+                      }
+                    }, 800);
+                  }
+                }
+              }
 
               animFrameRef.current = requestAnimationFrame(meterLoop);
             };
@@ -669,7 +815,7 @@ export function useVoiceSession() {
       setErrorMessage(errText);
       addSystemMessage(errText);
     }
-  }, [cleanup, addSystemMessage, settings.language, speakText]);
+  }, [cleanup, addSystemMessage, settings.language, speakText, transcribeAudioBlob]);
 
   // Continuous Speech Recognition manager with Silence Turn Detection
   useEffect(() => {
@@ -687,7 +833,7 @@ export function useVoiceSession() {
     let accumulatedText = '';
 
     const startListener = () => {
-      if (isStoppedExplicitly || connectionStatusRef.current !== 'CONNECTED' || isMutedRef.current) {
+      if (isStoppedExplicitly || isMutedRef.current) {
         return;
       }
 
@@ -759,6 +905,9 @@ export function useVoiceSession() {
               setInterimTranscript('');
 
               if (textToSend && !isAssistantSpeakingRef.current && voiceStateRef.current !== 'SPEAKING') {
+                // Cancel in-flight MediaRecorder buffer so we don't double-send
+                audioChunksRef.current = [];
+
                 if (Date.now() - lastAssistantFinishTimeRef.current < 1800 && isAcousticEcho(textToSend, recentAssistantTextsRef.current)) {
                   console.log('[Echo Filter] Discarded timeout echo:', textToSend);
                   return;
@@ -774,6 +923,9 @@ export function useVoiceSession() {
             const textToSend = final.trim();
             accumulatedText = '';
             setInterimTranscript('');
+
+            // Cancel in-flight MediaRecorder buffer so we don't double-send
+            audioChunksRef.current = [];
 
             if (Date.now() - lastAssistantFinishTimeRef.current < 1800 && isAcousticEcho(textToSend, recentAssistantTextsRef.current)) {
               console.log('[Echo Filter] Discarded final echo:', textToSend);
@@ -794,9 +946,9 @@ export function useVoiceSession() {
         recognition.onend = () => {
           activeRecognition = null;
           // Chrome stops recognition on silence. Auto-restart immediately so mic stays alive!
-          if (!isStoppedExplicitly && connectionStatusRef.current === 'CONNECTED' && !isMutedRef.current) {
+          if (!isStoppedExplicitly && !isMutedRef.current) {
             setTimeout(() => {
-              if (!isStoppedExplicitly && connectionStatusRef.current === 'CONNECTED' && !isMutedRef.current) {
+              if (!isStoppedExplicitly && !isMutedRef.current) {
                 startListener();
               }
             }, 100);
@@ -809,7 +961,7 @@ export function useVoiceSession() {
       } catch (err) {
         console.warn('[SpeechRecognition Start Failed]', err);
         setTimeout(() => {
-          if (!isStoppedExplicitly && connectionStatusRef.current === 'CONNECTED' && !isMutedRef.current) {
+          if (!isStoppedExplicitly && !isMutedRef.current) {
             startListener();
           }
         }, 400);

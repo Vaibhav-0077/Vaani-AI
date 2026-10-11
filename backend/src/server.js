@@ -20,7 +20,7 @@ app.use(cors({
   origin: CORS_ORIGIN === '*' ? true : [CORS_ORIGIN, 'http://localhost:5173', 'http://127.0.0.1:5173'],
   credentials: true,
 }));
-app.use(express.json());
+app.use(express.json({ limit: '25mb' }));
 
 // Sanitize inputs
 function sanitizeString(str, defaultValue, maxLength = 64) {
@@ -170,6 +170,100 @@ Respond in the language or mix of English/Hindi matching the user.`;
   } catch (err) {
     console.error('[Chat API Error]', err);
     return res.status(500).json({ error: 'Failed to process chat', message: err.message });
+  }
+});
+
+// 5. High-Accuracy Multilingual Audio Transcription endpoint (Groq Whisper Large v3 Turbo & Deepgram Nova-2)
+app.post('/api/transcribe', async (req, res) => {
+  try {
+    const { audio, mimeType = 'audio/webm', language = 'auto' } = req.body;
+    if (!audio || typeof audio !== 'string') {
+      return res.status(400).json({ error: 'Audio data is required (base64 string)' });
+    }
+
+    const groqKey = process.env.GROQ_API_KEY;
+    const deepgramKey = process.env.DEEPGRAM_API_KEY;
+
+    // Convert base64 data to binary buffer
+    const base64Data = audio.replace(/^data:audio\/\w+;base64,/, '');
+    const audioBuffer = Buffer.from(base64Data, 'base64');
+
+    if (audioBuffer.length < 500) {
+      return res.json({ transcript: '' });
+    }
+
+    // 1. Primary: Groq Whisper Large v3 Turbo (~150ms latency)
+    if (groqKey && !groqKey.includes('your_groq_api_key')) {
+      try {
+        const formData = new FormData();
+        const blob = new Blob([audioBuffer], { type: mimeType });
+        const ext = mimeType.includes('wav') ? 'wav' : mimeType.includes('ogg') ? 'ogg' : 'webm';
+        formData.append('file', blob, `audio.${ext}`);
+        formData.append('model', 'whisper-large-v3-turbo');
+        formData.append('response_format', 'json');
+
+        if (language === 'hi-IN' || language === 'hi') {
+          formData.append('language', 'hi');
+        } else if (language === 'en-US' || language === 'en') {
+          formData.append('language', 'en');
+        }
+
+        const whisperRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${groqKey.trim()}`,
+            'User-Agent': 'VaaniAgent/1.0',
+          },
+          body: formData,
+        });
+
+        if (whisperRes.ok) {
+          const whisperData = await whisperRes.json();
+          const transcript = (whisperData.text || '').trim();
+          return res.json({
+            transcript,
+            provider: 'groq-whisper',
+          });
+        } else {
+          const errText = await whisperRes.text().catch(() => '');
+          console.warn('[Groq Whisper Error]', whisperRes.status, errText);
+        }
+      } catch (whisperErr) {
+        console.warn('[Groq Whisper Fetch Failed]', whisperErr.message);
+      }
+    }
+
+    // 2. Secondary Fallback: Deepgram Nova-2 / Multilingual ASR
+    if (deepgramKey && !deepgramKey.includes('your_deepgram_api_key')) {
+      try {
+        const deepgramLang = language === 'hi-IN' ? 'hi' : 'en';
+        const deepgramRes = await fetch(`https://api.deepgram.com/v1/listen?model=nova-2&language=${deepgramLang}&smart_format=true`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Token ${deepgramKey.trim()}`,
+            'Content-Type': mimeType,
+            'User-Agent': 'VaaniAgent/1.0',
+          },
+          body: audioBuffer,
+        });
+
+        if (deepgramRes.ok) {
+          const dgData = await deepgramRes.json();
+          const transcript = dgData.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim() || '';
+          return res.json({
+            transcript,
+            provider: 'deepgram',
+          });
+        }
+      } catch (dgErr) {
+        console.warn('[Deepgram Fetch Failed]', dgErr.message);
+      }
+    }
+
+    return res.status(503).json({ error: 'No transcription service available' });
+  } catch (err) {
+    console.error('[Transcribe API Error]', err);
+    return res.status(500).json({ error: 'Failed to transcribe audio', message: err.message });
   }
 });
 
