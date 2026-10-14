@@ -167,6 +167,7 @@ export function useVoiceSession() {
 
   const roomRef = useRef<Room | null>(null);
   const audioTrackRef = useRef<LocalAudioTrack | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const activeAudioElementsRef = useRef<HTMLMediaElement[]>([]);
@@ -450,6 +451,12 @@ export function useVoiceSession() {
     if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
       audioContextRef.current.close().catch(() => {});
       audioContextRef.current = null;
+    }
+    if (micStreamRef.current) {
+      try {
+        micStreamRef.current.getTracks().forEach((t) => t.stop());
+      } catch {}
+      micStreamRef.current = null;
     }
     if (audioTrackRef.current) {
       try {
@@ -775,150 +782,156 @@ export function useVoiceSession() {
       // Connect to LiveKit SFU first
       await room.connect(tokenData.serverUrl, tokenData.token);
 
-      // 3. Enable microphone via official LiveKit participant API
+      // 3. Acquire hardware microphone directly for reliable Web Audio & STT capture
       try {
-        const pub = await room.localParticipant.setMicrophoneEnabled(true, {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
+        const micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
         });
+        micStreamRef.current = micStream;
+        setIsMicAllowed(true);
 
-        const localTrack = pub?.track as LocalAudioTrack | undefined;
-        if (localTrack) {
+        // Publish track to LiveKit room
+        try {
+          const micTrack = micStream.getAudioTracks()[0];
+          const localTrack = new LocalAudioTrack(micTrack);
           audioTrackRef.current = localTrack;
-          setIsMicAllowed(true);
+          await room.localParticipant.publishTrack(localTrack);
+        } catch (pubErr) {
+          console.warn('[LiveKit PublishTrack Warning]', pubErr);
+        }
 
-          // 4. Initialize MediaRecorder for Whisper Turn Detection & Audio Capture
-          try {
-            const stream = new MediaStream([localTrack.mediaStreamTrack]);
-            let mimeType = 'audio/webm';
-            if (typeof MediaRecorder !== 'undefined') {
-              if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-                mimeType = 'audio/webm;codecs=opus';
-              } else if (MediaRecorder.isTypeSupported('audio/webm')) {
-                mimeType = 'audio/webm';
-              } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-                mimeType = 'audio/mp4';
-              }
-
-              const mr = new MediaRecorder(stream, { mimeType });
-              mediaRecorderRef.current = mr;
-
-              mr.ondataavailable = (e) => {
-                if (e.data && e.data.size > 0) {
-                  audioChunksRef.current.push(e.data);
-                }
-              };
-
-              mr.onstop = () => {
-                const chunks = [...audioChunksRef.current];
-                audioChunksRef.current = [];
-                if (chunks.length > 0 && !isAssistantSpeakingRef.current && voiceStateRef.current !== 'SPEAKING') {
-                  const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
-                  console.log(`[STT Pipeline] Captured voice buffer: ${chunks.length} chunks, ${blob.size} bytes. Transcribing with Groq Whisper...`);
-                  transcribeAudioBlob(blob);
-                }
-              };
+        // 4. Initialize MediaRecorder for Whisper Turn Detection & Audio Capture
+        try {
+          let mimeType = 'audio/webm';
+          if (typeof MediaRecorder !== 'undefined') {
+            if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+              mimeType = 'audio/webm;codecs=opus';
+            } else if (MediaRecorder.isTypeSupported('audio/webm')) {
+              mimeType = 'audio/webm';
+            } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+              mimeType = 'audio/mp4';
             }
-          } catch (mrErr) {
-            console.warn('[MediaRecorder Init Warning]', mrErr);
-          }
 
-          // 5. Web Audio API Analyser for real-time visualizer pulsing & VAD turn detection
-          const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-          if (AudioCtx) {
-            const audioCtx = audioContextRef.current || new AudioCtx();
-            audioContextRef.current = audioCtx;
+            const mr = new MediaRecorder(micStream, { mimeType });
+            mediaRecorderRef.current = mr;
+
+            mr.ondataavailable = (e) => {
+              if (e.data && e.data.size > 0) {
+                audioChunksRef.current.push(e.data);
+              }
+            };
+
+            mr.onstop = () => {
+              const chunks = [...audioChunksRef.current];
+              audioChunksRef.current = [];
+              if (chunks.length > 0 && !isAssistantSpeakingRef.current && voiceStateRef.current !== 'SPEAKING') {
+                const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
+                console.log(`[STT Pipeline] Captured voice buffer: ${chunks.length} chunks, ${blob.size} bytes. Transcribing with Groq Whisper...`);
+                transcribeAudioBlob(blob);
+              }
+            };
+          }
+        } catch (mrErr) {
+          console.warn('[MediaRecorder Init Warning]', mrErr);
+        }
+
+        // 5. Web Audio API Analyser for real-time visualizer pulsing & VAD turn detection
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioCtx) {
+          const audioCtx = audioContextRef.current || new AudioCtx();
+          audioContextRef.current = audioCtx;
+          if (audioCtx.state === 'suspended') {
+            audioCtx.resume().catch(() => {});
+          }
+          const source = audioCtx.createMediaStreamSource(micStream);
+          const analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 64;
+          analyser.smoothingTimeConstant = 0.5;
+          source.connect(analyser);
+
+          const dataArray = new Uint8Array(analyser.frequencyBinCount);
+          let noiseFloor = 3.0;
+
+          const meterLoop = () => {
+            if (!micStreamRef.current) return;
             if (audioCtx.state === 'suspended') {
               audioCtx.resume().catch(() => {});
             }
-            const mediaStream = new MediaStream([localTrack.mediaStreamTrack]);
-            const source = audioCtx.createMediaStreamSource(mediaStream);
-            const analyser = audioCtx.createAnalyser();
-            analyser.fftSize = 64;
-            analyser.smoothingTimeConstant = 0.5;
-            source.connect(analyser);
+            analyser.getByteFrequencyData(dataArray);
+            let sum = 0;
+            for (let i = 0; i < dataArray.length; i++) {
+              sum += dataArray[i];
+            }
+            const avg = sum / dataArray.length;
 
-            const dataArray = new Uint8Array(analyser.frequencyBinCount);
-            let noiseFloor = 3.0;
+            // If assistant is actively speaking, clamp visualizer and ignore mic input
+            if (isAssistantSpeakingRef.current || voiceStateRef.current === 'SPEAKING') {
+              setAudioLevel(0);
+              animFrameRef.current = requestAnimationFrame(meterLoop);
+              return;
+            }
 
-            const meterLoop = () => {
-              if (!audioTrackRef.current) return;
-              if (audioCtx.state === 'suspended') {
-                audioCtx.resume().catch(() => {});
-              }
-              analyser.getByteFrequencyData(dataArray);
-              let sum = 0;
-              for (let i = 0; i < dataArray.length; i++) {
-                sum += dataArray[i];
-              }
-              const avg = sum / dataArray.length;
+            // Continuously adapt baseline room noise during silence
+            if (!isUserSpeakingRef.current) {
+              noiseFloor = noiseFloor * 0.96 + avg * 0.04;
+            }
 
-              // If assistant is actively speaking, clamp visualizer and ignore mic input
-              if (isAssistantSpeakingRef.current || voiceStateRef.current === 'SPEAKING') {
-                setAudioLevel(0);
-                animFrameRef.current = requestAnimationFrame(meterLoop);
-                return;
-              }
+            const speechDelta = avg - noiseFloor;
+            const normalized = Math.min(1.0, Math.max(0, speechDelta / 25));
+            setAudioLevel(normalized);
 
-              // Continuously adapt baseline room noise during silence
-              if (!isUserSpeakingRef.current) {
-                noiseFloor = noiseFloor * 0.96 + avg * 0.04;
-              }
+            // Voice Activity Detection (VAD) with adaptive room sensitivity
+            if (
+              voiceStateRef.current === 'LISTENING' &&
+              !isMutedRef.current &&
+              mediaRecorderRef.current
+            ) {
+              const mr = mediaRecorderRef.current;
+              const isSpeaking = speechDelta > 1.8 || avg > 5.0;
 
-              const speechDelta = avg - noiseFloor;
-              const normalized = Math.min(1.0, Math.max(0, speechDelta / 25));
-              setAudioLevel(normalized);
-
-              // Voice Activity Detection (VAD) with adaptive room sensitivity
-              if (
-                voiceStateRef.current === 'LISTENING' &&
-                !isMutedRef.current &&
-                mediaRecorderRef.current
-              ) {
-                const mr = mediaRecorderRef.current;
-                const isSpeaking = speechDelta > 1.8 || avg > 5.0;
-
-                if (isSpeaking) {
-                  // User started speaking into microphone
-                  if (!isUserSpeakingRef.current) {
-                    isUserSpeakingRef.current = true;
-                    audioChunksRef.current = [];
-                    if (mr.state === 'inactive') {
-                      try {
-                        mr.start(100);
-                        console.log(`[VAD] User speaking started (level: ${avg.toFixed(1)}, noise: ${noiseFloor.toFixed(1)})`);
-                      } catch (err) {
-                        console.warn('[VAD MediaRecorder Start]', err);
-                      }
+              if (isSpeaking) {
+                // User started speaking into microphone
+                if (!isUserSpeakingRef.current) {
+                  isUserSpeakingRef.current = true;
+                  audioChunksRef.current = [];
+                  if (mr.state === 'inactive') {
+                    try {
+                      mr.start(100);
+                      console.log(`[VAD] User speaking started (level: ${avg.toFixed(1)}, noise: ${noiseFloor.toFixed(1)})`);
+                    } catch (err) {
+                      console.warn('[VAD MediaRecorder Start]', err);
                     }
-                    setInterimTranscript('Listening to your voice...');
                   }
-                  if (speechSilenceTimerRef.current) {
-                    clearTimeout(speechSilenceTimerRef.current);
+                  setInterimTranscript('Listening to your voice...');
+                }
+                if (speechSilenceTimerRef.current) {
+                  clearTimeout(speechSilenceTimerRef.current);
+                  speechSilenceTimerRef.current = null;
+                }
+              } else if (isUserSpeakingRef.current) {
+                // User paused speaking -> wait 700ms silence endpointing to finalize turn
+                if (!speechSilenceTimerRef.current) {
+                  speechSilenceTimerRef.current = setTimeout(() => {
+                    isUserSpeakingRef.current = false;
                     speechSilenceTimerRef.current = null;
-                  }
-                } else if (isUserSpeakingRef.current) {
-                  // User paused speaking -> wait 700ms silence endpointing to finalize turn
-                  if (!speechSilenceTimerRef.current) {
-                    speechSilenceTimerRef.current = setTimeout(() => {
-                      isUserSpeakingRef.current = false;
-                      speechSilenceTimerRef.current = null;
-                      console.log('[VAD] User paused speaking -> stopping MediaRecorder to transcribe');
-                      if (mr.state === 'recording') {
-                        try {
-                          mr.stop();
-                        } catch {}
-                      }
-                    }, 700);
-                  }
+                    console.log('[VAD] User paused speaking -> stopping MediaRecorder to transcribe');
+                    if (mr.state === 'recording') {
+                      try {
+                        mr.stop();
+                      } catch {}
+                    }
+                  }, 700);
                 }
               }
+            }
 
-              animFrameRef.current = requestAnimationFrame(meterLoop);
-            };
             animFrameRef.current = requestAnimationFrame(meterLoop);
-          }
+          };
+          animFrameRef.current = requestAnimationFrame(meterLoop);
         }
       } catch (micErr: any) {
         console.error('[Microphone Permission Error]', micErr);
@@ -1127,6 +1140,11 @@ export function useVoiceSession() {
     const targetMute = !isMuted;
     isMutedRef.current = targetMute;
     try {
+      if (micStreamRef.current) {
+        micStreamRef.current.getAudioTracks().forEach((t) => {
+          t.enabled = !targetMute;
+        });
+      }
       if (roomRef.current?.localParticipant) {
         await roomRef.current.localParticipant.setMicrophoneEnabled(!targetMute);
       } else if (audioTrackRef.current) {
