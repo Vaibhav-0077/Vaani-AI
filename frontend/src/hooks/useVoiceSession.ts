@@ -279,11 +279,6 @@ export function useVoiceSession() {
         audioChunksRef.current = [];
         isUserSpeakingRef.current = false;
 
-        // Physically mute microphone track so speakers cannot be heard by any audio API
-        if (audioTrackRef.current) {
-          audioTrackRef.current.mediaStreamTrack.enabled = false;
-        }
-
         // 2. Record text in recent assistant utterances
         recentAssistantTextsRef.current = [
           ...recentAssistantTextsRef.current.slice(-4),
@@ -311,9 +306,6 @@ export function useVoiceSession() {
         utterance.onstart = () => {
           isAssistantSpeakingRef.current = true;
           setVoiceState('SPEAKING');
-          if (audioTrackRef.current) {
-            audioTrackRef.current.mediaStreamTrack.enabled = false;
-          }
         };
 
         let hasFinished = false;
@@ -328,19 +320,12 @@ export function useVoiceSession() {
           speechSynthUtteranceRef.current = null;
           if (onDone) onDone();
 
-          // 450ms acoustic grace period: wait for physical speaker sound to completely clear
+          // 400ms acoustic grace period: wait for physical speaker sound to completely clear
           setTimeout(() => {
-            // Re-enable microphone track
-            if (audioTrackRef.current) {
-              audioTrackRef.current.mediaStreamTrack.enabled = !isMutedRef.current;
-            }
             isAssistantSpeakingRef.current = false;
             audioChunksRef.current = [];
             isUserSpeakingRef.current = false;
-
-            if (voiceStateRef.current === 'SPEAKING') {
-              setVoiceState('LISTENING');
-            }
+            setVoiceState('LISTENING');
 
             // Resume audio context if suspended
             if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
@@ -351,7 +336,7 @@ export function useVoiceSession() {
             if (!isMutedRef.current && connectionStatusRef.current === 'CONNECTED') {
               startSpeechListenerRef.current();
             }
-          }, 450);
+          }, 400);
         };
 
         utterance.onend = finishSpeaking;
@@ -830,6 +815,7 @@ export function useVoiceSession() {
                 audioChunksRef.current = [];
                 if (chunks.length > 0 && !isAssistantSpeakingRef.current && voiceStateRef.current !== 'SPEAKING') {
                   const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
+                  console.log(`[STT Pipeline] Captured voice buffer: ${chunks.length} chunks, ${blob.size} bytes. Transcribing with Groq Whisper...`);
                   transcribeAudioBlob(blob);
                 }
               };
@@ -854,6 +840,7 @@ export function useVoiceSession() {
             source.connect(analyser);
 
             const dataArray = new Uint8Array(analyser.frequencyBinCount);
+            let noiseFloor = 3.0;
 
             const meterLoop = () => {
               if (!audioTrackRef.current) return;
@@ -866,20 +853,33 @@ export function useVoiceSession() {
                 sum += dataArray[i];
               }
               const avg = sum / dataArray.length;
-              // Sensitive human voice amplitude mapping
-              const normalized = Math.min(1.0, Math.max(0, (avg - 4) / 45));
+
+              // If assistant is actively speaking, clamp visualizer and ignore mic input
+              if (isAssistantSpeakingRef.current || voiceStateRef.current === 'SPEAKING') {
+                setAudioLevel(0);
+                animFrameRef.current = requestAnimationFrame(meterLoop);
+                return;
+              }
+
+              // Continuously adapt baseline room noise during silence
+              if (!isUserSpeakingRef.current) {
+                noiseFloor = noiseFloor * 0.96 + avg * 0.04;
+              }
+
+              const speechDelta = avg - noiseFloor;
+              const normalized = Math.min(1.0, Math.max(0, speechDelta / 25));
               setAudioLevel(normalized);
 
-              // Voice Activity Detection (VAD) for automatic user voice turn endpointing
+              // Voice Activity Detection (VAD) with adaptive room sensitivity
               if (
                 voiceStateRef.current === 'LISTENING' &&
-                !isAssistantSpeakingRef.current &&
                 !isMutedRef.current &&
                 mediaRecorderRef.current
               ) {
                 const mr = mediaRecorderRef.current;
-                // Sensitive voice detection threshold for normal human speech
-                if (normalized > 0.03 || avg > 6) {
+                const isSpeaking = speechDelta > 1.8 || avg > 5.0;
+
+                if (isSpeaking) {
                   // User started speaking into microphone
                   if (!isUserSpeakingRef.current) {
                     isUserSpeakingRef.current = true;
@@ -887,7 +887,10 @@ export function useVoiceSession() {
                     if (mr.state === 'inactive') {
                       try {
                         mr.start(100);
-                      } catch {}
+                        console.log(`[VAD] User speaking started (level: ${avg.toFixed(1)}, noise: ${noiseFloor.toFixed(1)})`);
+                      } catch (err) {
+                        console.warn('[VAD MediaRecorder Start]', err);
+                      }
                     }
                     setInterimTranscript('Listening to your voice...');
                   }
@@ -896,17 +899,18 @@ export function useVoiceSession() {
                     speechSilenceTimerRef.current = null;
                   }
                 } else if (isUserSpeakingRef.current) {
-                  // User paused speaking -> wait 750ms silence endpointing to finalize turn
+                  // User paused speaking -> wait 700ms silence endpointing to finalize turn
                   if (!speechSilenceTimerRef.current) {
                     speechSilenceTimerRef.current = setTimeout(() => {
                       isUserSpeakingRef.current = false;
                       speechSilenceTimerRef.current = null;
+                      console.log('[VAD] User paused speaking -> stopping MediaRecorder to transcribe');
                       if (mr.state === 'recording') {
                         try {
                           mr.stop();
                         } catch {}
                       }
-                    }, 750);
+                    }, 700);
                   }
                 }
               }
