@@ -81,50 +81,57 @@ function generateAssistantResponse(text: string, language: string = 'en-US'): st
   return `I heard you say: "${text}". I am listening and ready to help. What would you like to explore next?`;
 }
 
-const COMMON_CONVERSATIONAL_WORDS = new Set([
-  'hello', 'hi', 'hey', 'how', 'are', 'you', 'today', 'can', 'help', 'what', 'i', 'am',
-  'is', 'the', 'a', 'an', 'to', 'in', 'it', 'me', 'do', 'for', 'and', 'or', 'so',
-  'namaste', 'aap', 'kaise', 'ho', 'kya', 'hai', 'mera', 'naam', 'main', 'bolo',
-]);
+function normalizeForEcho(str: string): string {
+  return str
+    .toLowerCase()
+    .replace(/['’]m\b/g, ' am')
+    .replace(/['’]s\b/g, ' is')
+    .replace(/['’]re\b/g, ' are')
+    .replace(/['’]ve\b/g, ' have')
+    .replace(/['’]ll\b/g, ' will')
+    .replace(/can['’]t\b/g, 'cannot')
+    .replace(/won['’]t\b/g, 'will not')
+    .replace(/n['’]t\b/g, ' not')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 /**
- * Detects whether a transcribed user utterance is an acoustic echo
- * of what the assistant just spoke through the device speakers.
+ * Strict acoustic echo detector: Prevents assistant's spoken responses from being
+ * transcribed by the microphone and fed back as user input.
  */
 function isAcousticEcho(userInput: string, assistantResponses: string[]): boolean {
   if (!userInput.trim()) return false;
-  // Extract distinct, non-stop words
-  const userWords = userInput
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, '')
-    .split(/\s+/)
-    .filter((w) => w.length > 2 && !COMMON_CONVERSATIONAL_WORDS.has(w));
-
-  // If the user's sentence only contains general greeting words (e.g. "hello", "how are you"),
-  // NEVER classify it as an echo! It is a genuine human utterance!
-  if (userWords.length === 0) return false;
+  const cleanUser = normalizeForEcho(userInput);
+  if (!cleanUser) return false;
 
   for (const resp of assistantResponses) {
     if (!resp) continue;
-    const respWords = new Set(
-      resp
-        .toLowerCase()
-        .replace(/[^a-z0-9\s]/g, '')
-        .split(/\s+/)
-        .filter((w) => w.length > 2 && !COMMON_CONVERSATIONAL_WORDS.has(w))
-    );
+    const cleanResp = normalizeForEcho(resp);
+    if (!cleanResp) continue;
 
-    let matchCount = 0;
-    for (const w of userWords) {
-      if (respWords.has(w)) {
-        matchCount++;
-      }
+    // 1. Direct equality
+    if (cleanResp === cleanUser) return true;
+
+    // 2. Substring match (either user speech is contained in assistant response or vice versa)
+    if (cleanUser.length > 6 && (cleanResp.includes(cleanUser) || cleanUser.includes(cleanResp))) {
+      return true;
     }
 
-    const matchRatio = matchCount / userWords.length;
-    // Only classify as echo if distinctive non-generic words match heavily (>= 60% and at least 3 distinctive words)
-    if (matchRatio >= 0.6 && matchCount >= 3) {
-      return true;
+    // 3. Significant word overlap match
+    const userWords = cleanUser.split(/\s+/).filter((w) => w.length > 1);
+    const respWords = new Set(cleanResp.split(/\s+/).filter((w) => w.length > 1));
+
+    if (userWords.length >= 2) {
+      let matches = 0;
+      for (const w of userWords) {
+        if (respWords.has(w)) matches++;
+      }
+      // If 60% or more of words in the user sentence were in the assistant's response, it is an echo
+      if (matches / userWords.length >= 0.6) {
+        return true;
+      }
     }
   }
 
@@ -180,6 +187,7 @@ export function useVoiceSession() {
   const isUserSpeakingRef = useRef<boolean>(false);
   const speechSilenceTimerRef = useRef<any>(null);
   const isTranscribingRef = useRef<boolean>(false);
+  const startSpeechListenerRef = useRef<() => void>(() => {});
 
   // Keep refs in sync for asynchronous handlers
   useEffect(() => {
@@ -230,9 +238,14 @@ export function useVoiceSession() {
       }
     });
     activeAudioElementsRef.current = [];
+
+    // Ensure microphone is unmuted when audio is stopped
+    if (audioTrackRef.current) {
+      audioTrackRef.current.mediaStreamTrack.enabled = !isMutedRef.current;
+    }
   }, []);
 
-  // Browser TTS Voice Playback helper with Acoustic Echo Gate
+  // Browser TTS Voice Playback helper with Half-Duplex Mic Muting & Acoustic Echo Gate
   const speakText = useCallback(
     (text: string, onDone?: () => void) => {
       if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
@@ -243,12 +256,39 @@ export function useVoiceSession() {
       try {
         window.speechSynthesis.cancel();
 
-        // 1. Record text in recent assistant utterances and mark assistant as speaking
+        // 1. HARD MIC MUTE: Abort active listeners and disable mic track so speakers CANNOT echo
+        isAssistantSpeakingRef.current = true;
+        setVoiceState('SPEAKING');
+
+        if (speechRecognitionRef.current) {
+          try {
+            speechRecognitionRef.current.abort();
+          } catch {}
+        }
+
+        if (speechSilenceTimerRef.current) {
+          clearTimeout(speechSilenceTimerRef.current);
+          speechSilenceTimerRef.current = null;
+        }
+
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+          try {
+            mediaRecorderRef.current.stop();
+          } catch {}
+        }
+        audioChunksRef.current = [];
+        isUserSpeakingRef.current = false;
+
+        // Physically mute microphone track so speakers cannot be heard by any audio API
+        if (audioTrackRef.current) {
+          audioTrackRef.current.mediaStreamTrack.enabled = false;
+        }
+
+        // 2. Record text in recent assistant utterances
         recentAssistantTextsRef.current = [
           ...recentAssistantTextsRef.current.slice(-4),
           text,
         ];
-        isAssistantSpeakingRef.current = true;
 
         const utterance = new SpeechSynthesisUtterance(text);
         speechSynthUtteranceRef.current = utterance;
@@ -271,20 +311,47 @@ export function useVoiceSession() {
         utterance.onstart = () => {
           isAssistantSpeakingRef.current = true;
           setVoiceState('SPEAKING');
+          if (audioTrackRef.current) {
+            audioTrackRef.current.mediaStreamTrack.enabled = false;
+          }
         };
 
+        let hasFinished = false;
+        let watchdogTimer: any = null;
+
         const finishSpeaking = () => {
+          if (hasFinished) return;
+          hasFinished = true;
+          if (watchdogTimer) clearTimeout(watchdogTimer);
+
           lastAssistantFinishTimeRef.current = Date.now();
           speechSynthUtteranceRef.current = null;
-          if (voiceStateRef.current === 'SPEAKING') {
-            setVoiceState('LISTENING');
-          }
           if (onDone) onDone();
 
-          // 500ms acoustic buffer before re-enabling microphone listening
+          // 450ms acoustic grace period: wait for physical speaker sound to completely clear
           setTimeout(() => {
+            // Re-enable microphone track
+            if (audioTrackRef.current) {
+              audioTrackRef.current.mediaStreamTrack.enabled = !isMutedRef.current;
+            }
             isAssistantSpeakingRef.current = false;
-          }, 500);
+            audioChunksRef.current = [];
+            isUserSpeakingRef.current = false;
+
+            if (voiceStateRef.current === 'SPEAKING') {
+              setVoiceState('LISTENING');
+            }
+
+            // Resume audio context if suspended
+            if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+              audioContextRef.current.resume().catch(() => {});
+            }
+
+            // Fresh start for SpeechRecognition now that speaker sound has dissipated
+            if (!isMutedRef.current && connectionStatusRef.current === 'CONNECTED') {
+              startSpeechListenerRef.current();
+            }
+          }, 450);
         };
 
         utterance.onend = finishSpeaking;
@@ -296,9 +363,21 @@ export function useVoiceSession() {
           finishSpeaking();
         };
 
+        // Watchdog timeout to prevent speech synthesis hang bug in Chrome
+        const watchdogMs = Math.max(5000, text.length * 120);
+        watchdogTimer = setTimeout(() => {
+          if (!hasFinished) {
+            console.warn('[SpeechSynthesis Watchdog] Forcing speech completion after timeout');
+            finishSpeaking();
+          }
+        }, watchdogMs);
+
         window.speechSynthesis.speak(utterance);
       } catch (err) {
         console.warn('[SpeechSynthesis Speak Failed]', err);
+        if (audioTrackRef.current) {
+          audioTrackRef.current.mediaStreamTrack.enabled = !isMutedRef.current;
+        }
         isAssistantSpeakingRef.current = false;
         if (voiceStateRef.current === 'SPEAKING') {
           setVoiceState('LISTENING');
@@ -314,6 +393,13 @@ export function useVoiceSession() {
     if (voiceStateRef.current === 'SPEAKING' || voiceStateRef.current === 'THINKING') {
       stopPlaybackAudio();
       isAssistantSpeakingRef.current = false;
+      audioChunksRef.current = [];
+      isUserSpeakingRef.current = false;
+
+      // Re-enable microphone track immediately on interrupt
+      if (audioTrackRef.current) {
+        audioTrackRef.current.mediaStreamTrack.enabled = !isMutedRef.current;
+      }
 
       // Send interruption signal via LiveKit DataChannel to agent
       if (roomRef.current?.localParticipant) {
@@ -340,6 +426,11 @@ export function useVoiceSession() {
       });
 
       addSystemMessage('Barge-in triggered: Assistant response stopped.');
+
+      // Restart SpeechRecognition immediately for user turn
+      if (!isMutedRef.current && connectionStatusRef.current === 'CONNECTED') {
+        startSpeechListenerRef.current();
+      }
       return true;
     }
     return false;
@@ -410,6 +501,12 @@ export function useVoiceSession() {
     (content: string) => {
       if (!content.trim()) return;
       const text = content.trim();
+
+      // Universal Acoustic Echo Protection: Discard if incoming text echoes assistant's recent speech
+      if (isAcousticEcho(text, recentAssistantTextsRef.current)) {
+        console.warn('[Echo Protection] Dropped acoustic echo in sendMessage:', text);
+        return;
+      }
 
       const userMsg: ChatMessage = {
         id: `user-${Date.now()}`,
@@ -518,6 +615,10 @@ export function useVoiceSession() {
               if (transcript) {
                 console.log('[Whisper Transcribed]:', transcript);
                 setInterimTranscript('');
+                if (isAcousticEcho(transcript, recentAssistantTextsRef.current)) {
+                  console.warn('[Echo Filter] Discarded Whisper echo:', transcript);
+                  return;
+                }
                 sendMessage(transcript);
               } else {
                 setInterimTranscript('');
@@ -550,6 +651,19 @@ export function useVoiceSession() {
     setErrorMessage(null);
     setConnectionStatus('CONNECTING');
     setVoiceState('CONNECTING');
+
+    // Ensure AudioContext is initialized and resumed under user click gesture
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (AudioCtx) {
+      try {
+        if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+          audioContextRef.current = new AudioCtx();
+        }
+        if (audioContextRef.current.state === 'suspended') {
+          audioContextRef.current.resume().catch(() => {});
+        }
+      } catch {}
+    }
 
     // 1. Request ephemeral token from Node.js backend
     const apiBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
@@ -714,7 +828,7 @@ export function useVoiceSession() {
               mr.onstop = () => {
                 const chunks = [...audioChunksRef.current];
                 audioChunksRef.current = [];
-                if (chunks.length > 0) {
+                if (chunks.length > 0 && !isAssistantSpeakingRef.current && voiceStateRef.current !== 'SPEAKING') {
                   const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
                   transcribeAudioBlob(blob);
                 }
@@ -727,8 +841,11 @@ export function useVoiceSession() {
           // 5. Web Audio API Analyser for real-time visualizer pulsing & VAD turn detection
           const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
           if (AudioCtx) {
-            const audioCtx = new AudioCtx();
+            const audioCtx = audioContextRef.current || new AudioCtx();
             audioContextRef.current = audioCtx;
+            if (audioCtx.state === 'suspended') {
+              audioCtx.resume().catch(() => {});
+            }
             const mediaStream = new MediaStream([localTrack.mediaStreamTrack]);
             const source = audioCtx.createMediaStreamSource(mediaStream);
             const analyser = audioCtx.createAnalyser();
@@ -740,13 +857,17 @@ export function useVoiceSession() {
 
             const meterLoop = () => {
               if (!audioTrackRef.current) return;
+              if (audioCtx.state === 'suspended') {
+                audioCtx.resume().catch(() => {});
+              }
               analyser.getByteFrequencyData(dataArray);
               let sum = 0;
               for (let i = 0; i < dataArray.length; i++) {
                 sum += dataArray[i];
               }
               const avg = sum / dataArray.length;
-              const normalized = Math.min(1.0, Math.max(0, (avg - 8) / 60));
+              // Sensitive human voice amplitude mapping
+              const normalized = Math.min(1.0, Math.max(0, (avg - 4) / 45));
               setAudioLevel(normalized);
 
               // Voice Activity Detection (VAD) for automatic user voice turn endpointing
@@ -757,14 +878,15 @@ export function useVoiceSession() {
                 mediaRecorderRef.current
               ) {
                 const mr = mediaRecorderRef.current;
-                if (normalized > 0.07) {
+                // Sensitive voice detection threshold for normal human speech
+                if (normalized > 0.03 || avg > 6) {
                   // User started speaking into microphone
                   if (!isUserSpeakingRef.current) {
                     isUserSpeakingRef.current = true;
                     audioChunksRef.current = [];
                     if (mr.state === 'inactive') {
                       try {
-                        mr.start(120);
+                        mr.start(100);
                       } catch {}
                     }
                     setInterimTranscript('Listening to your voice...');
@@ -774,7 +896,7 @@ export function useVoiceSession() {
                     speechSilenceTimerRef.current = null;
                   }
                 } else if (isUserSpeakingRef.current) {
-                  // User paused speaking -> wait 800ms silence endpointing to finalize turn
+                  // User paused speaking -> wait 750ms silence endpointing to finalize turn
                   if (!speechSilenceTimerRef.current) {
                     speechSilenceTimerRef.current = setTimeout(() => {
                       isUserSpeakingRef.current = false;
@@ -784,7 +906,7 @@ export function useVoiceSession() {
                           mr.stop();
                         } catch {}
                       }
-                    }, 800);
+                    }, 750);
                   }
                 }
               }
@@ -833,7 +955,7 @@ export function useVoiceSession() {
     let accumulatedText = '';
 
     const startListener = () => {
-      if (isStoppedExplicitly || isMutedRef.current) {
+      if (isStoppedExplicitly || isMutedRef.current || isAssistantSpeakingRef.current) {
         return;
       }
 
@@ -885,10 +1007,9 @@ export function useVoiceSession() {
 
           const currentText = (final || interim).trim();
           if (currentText) {
-            // Check if this audio is an echo of the assistant's previous speech (within 1.8s)
-            const timeSinceSpoke = Date.now() - lastAssistantFinishTimeRef.current;
-            if (timeSinceSpoke < 1800 && isAcousticEcho(currentText, recentAssistantTextsRef.current)) {
-              console.log('[Echo Filter] Discarded speaker echo:', currentText);
+            // Check if this audio is an echo of the assistant's previous speech
+            if (isAcousticEcho(currentText, recentAssistantTextsRef.current)) {
+              console.log('[Echo Filter] Discarded speaker echo (interim):', currentText);
               accumulatedText = '';
               setInterimTranscript('');
               return;
@@ -897,7 +1018,7 @@ export function useVoiceSession() {
             accumulatedText = currentText;
             setInterimTranscript(currentText);
 
-            // Turn Detection Endpointing: If user pauses speaking for 950ms, finalize and send!
+            // Turn Detection Endpointing: If user pauses speaking for 850ms, finalize and send!
             clearTimeout(silenceTimer);
             silenceTimer = setTimeout(() => {
               const textToSend = accumulatedText.trim();
@@ -905,17 +1026,16 @@ export function useVoiceSession() {
               setInterimTranscript('');
 
               if (textToSend && !isAssistantSpeakingRef.current && voiceStateRef.current !== 'SPEAKING') {
-                // Cancel in-flight MediaRecorder buffer so we don't double-send
-                audioChunksRef.current = [];
-
-                if (Date.now() - lastAssistantFinishTimeRef.current < 1800 && isAcousticEcho(textToSend, recentAssistantTextsRef.current)) {
+                if (isAcousticEcho(textToSend, recentAssistantTextsRef.current)) {
                   console.log('[Echo Filter] Discarded timeout echo:', textToSend);
                   return;
                 }
+                // Cancel in-flight MediaRecorder buffer so we don't double-send
+                audioChunksRef.current = [];
                 console.log('[STT] Finalized user voice input (pause):', textToSend);
                 sendMessage(textToSend);
               }
-            }, 950);
+            }, 850);
           }
 
           if (final.trim()) {
@@ -924,14 +1044,13 @@ export function useVoiceSession() {
             accumulatedText = '';
             setInterimTranscript('');
 
-            // Cancel in-flight MediaRecorder buffer so we don't double-send
-            audioChunksRef.current = [];
-
-            if (Date.now() - lastAssistantFinishTimeRef.current < 1800 && isAcousticEcho(textToSend, recentAssistantTextsRef.current)) {
+            if (isAcousticEcho(textToSend, recentAssistantTextsRef.current)) {
               console.log('[Echo Filter] Discarded final echo:', textToSend);
               return;
             }
 
+            // Cancel in-flight MediaRecorder buffer so we don't double-send
+            audioChunksRef.current = [];
             console.log('[STT] Finalized user voice input (final):', textToSend);
             sendMessage(textToSend);
           }
@@ -946,9 +1065,9 @@ export function useVoiceSession() {
         recognition.onend = () => {
           activeRecognition = null;
           // Chrome stops recognition on silence. Auto-restart immediately so mic stays alive!
-          if (!isStoppedExplicitly && !isMutedRef.current) {
+          if (!isStoppedExplicitly && !isMutedRef.current && !isAssistantSpeakingRef.current) {
             setTimeout(() => {
-              if (!isStoppedExplicitly && !isMutedRef.current) {
+              if (!isStoppedExplicitly && !isMutedRef.current && !isAssistantSpeakingRef.current) {
                 startListener();
               }
             }, 100);
@@ -961,12 +1080,15 @@ export function useVoiceSession() {
       } catch (err) {
         console.warn('[SpeechRecognition Start Failed]', err);
         setTimeout(() => {
-          if (!isStoppedExplicitly && !isMutedRef.current) {
+          if (!isStoppedExplicitly && !isMutedRef.current && !isAssistantSpeakingRef.current) {
             startListener();
           }
         }, 400);
       }
     };
+
+    // Expose startListener to speakText and finishSpeaking via ref
+    startSpeechListenerRef.current = startListener;
 
     if (connectionStatus === 'CONNECTED' && !isMuted) {
       isStoppedExplicitly = false;
@@ -975,6 +1097,7 @@ export function useVoiceSession() {
 
     return () => {
       isStoppedExplicitly = true;
+      startSpeechListenerRef.current = () => {};
       clearTimeout(silenceTimer);
       if (activeRecognition) {
         try {
@@ -998,6 +1121,7 @@ export function useVoiceSession() {
   // Toggle mute handler
   const toggleMute = useCallback(async () => {
     const targetMute = !isMuted;
+    isMutedRef.current = targetMute;
     try {
       if (roomRef.current?.localParticipant) {
         await roomRef.current.localParticipant.setMicrophoneEnabled(!targetMute);
