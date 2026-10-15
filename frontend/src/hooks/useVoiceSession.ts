@@ -165,7 +165,7 @@ export function useVoiceSession() {
     continuousMode: true,
     autoScroll: true,
     debugMode: true, // Default to true in dev for Phase 4 latency instrumentation
-    autoSendVoice: false, // Voice input types into chat box for review before pressing Enter
+    autoSendVoice: true, // Voice input immediately triggers conversational AI response in voice calls
   });
 
   const roomRef = useRef<Room | null>(null);
@@ -180,6 +180,8 @@ export function useVoiceSession() {
   const dictationRecorderRef = useRef<MediaRecorder | null>(null);
   const dictationChunksRef = useRef<Blob[]>([]);
   const isDictatingRef = useRef<boolean>(false);
+  const dictationTimeoutRef = useRef<any>(null);
+  const stopDictationRef = useRef<() => void>(() => {});
 
   const voiceStateRef = useRef<VoiceState>('IDLE');
   const connectionStatusRef = useRef<ConnectionStatus>('DISCONNECTED');
@@ -515,6 +517,11 @@ export function useVoiceSession() {
     setIsDictating(false);
     isDictatingRef.current = false;
 
+    if (dictationTimeoutRef.current) {
+      clearTimeout(dictationTimeoutRef.current);
+      dictationTimeoutRef.current = null;
+    }
+
     // Stop SpeechRecognition if it was somehow used
     if (dictationRecognitionRef.current) {
       try {
@@ -533,6 +540,11 @@ export function useVoiceSession() {
     dictationRecorderRef.current = null;
   }, []);
 
+  // Keep stopDictationRef updated
+  useEffect(() => {
+    stopDictationRef.current = stopDictation;
+  }, [stopDictation]);
+
   // Start voice dictation: Records audio via MediaRecorder → sends to Whisper API → types into chat box
   const startDictation = useCallback(() => {
     if (isAssistantSpeakingRef.current) {
@@ -542,7 +554,16 @@ export function useVoiceSession() {
     setIsDictating(true);
     isDictatingRef.current = true;
     setChatInputText('');
-    setInterimTranscript('🎤 Recording your voice... Click mic again or press Enter when done.');
+    setInterimTranscript('');
+
+    // Safety timeout: auto-stop after 30s
+    if (dictationTimeoutRef.current) clearTimeout(dictationTimeoutRef.current);
+    dictationTimeoutRef.current = setTimeout(() => {
+      if (isDictatingRef.current) {
+        console.log('[Dictation] Safety timeout reached, stopping dictation...');
+        stopDictationRef.current();
+      }
+    }, 30000);
 
     // Use the already-connected LiveKit mic stream, or grab a new one
     const existingStream = micStreamRef.current;
@@ -557,6 +578,68 @@ export function useVoiceSession() {
         dictationRecorderRef.current = mr;
         dictationChunksRef.current = [];
 
+        // Real-time silence detection on stream during dictation
+        let silenceTimer: any = null;
+        let animId: number | null = null;
+        let hasSpoken = false;
+
+        try {
+          const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+          if (AudioCtx) {
+            const actx = audioContextRef.current || new AudioCtx();
+            if (actx.state === 'suspended') {
+              actx.resume().catch(() => {});
+            }
+            const src = actx.createMediaStreamSource(stream);
+            const analyser = actx.createAnalyser();
+            analyser.fftSize = 64;
+            src.connect(analyser);
+            const dataArr = new Uint8Array(analyser.frequencyBinCount);
+            let noiseFloor = 3.0;
+
+            const checkAudio = () => {
+              if (dictationRecorderRef.current !== mr || mr.state !== 'recording') {
+                return;
+              }
+              if (actx.state === 'suspended') {
+                actx.resume().catch(() => {});
+              }
+              analyser.getByteFrequencyData(dataArr);
+              let sum = 0;
+              for (let i = 0; i < dataArr.length; i++) sum += dataArr[i];
+              const avg = sum / dataArr.length;
+
+              if (!hasSpoken) {
+                noiseFloor = noiseFloor * 0.95 + avg * 0.05;
+              }
+              const speechDelta = avg - noiseFloor;
+
+              if (speechDelta > 1.8 || avg > 4.5) {
+                hasSpoken = true;
+                if (silenceTimer) {
+                  clearTimeout(silenceTimer);
+                  silenceTimer = null;
+                }
+              } else if (hasSpoken) {
+                // User spoke and paused: after 1.2s silence auto-stop and transcribe
+                if (!silenceTimer) {
+                  silenceTimer = setTimeout(() => {
+                    console.log('[Dictation] Silence detected after speaking, finalizing turn...');
+                    if (dictationRecorderRef.current === mr && mr.state === 'recording') {
+                      stopDictationRef.current();
+                    }
+                  }, 1200);
+                }
+              }
+
+              animId = requestAnimationFrame(checkAudio);
+            };
+            animId = requestAnimationFrame(checkAudio);
+          }
+        } catch (ctxErr) {
+          console.warn('[Dictation Analyser Error]', ctxErr);
+        }
+
         mr.ondataavailable = (e) => {
           if (e.data && e.data.size > 0) {
             dictationChunksRef.current.push(e.data);
@@ -564,6 +647,13 @@ export function useVoiceSession() {
         };
 
         mr.onstop = () => {
+          if (animId) cancelAnimationFrame(animId);
+          if (silenceTimer) clearTimeout(silenceTimer);
+          if (dictationTimeoutRef.current) {
+            clearTimeout(dictationTimeoutRef.current);
+            dictationTimeoutRef.current = null;
+          }
+
           const chunks = [...dictationChunksRef.current];
           dictationChunksRef.current = [];
 
@@ -578,8 +668,8 @@ export function useVoiceSession() {
           }
 
           const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
-          console.log(`[Dictation] Recorded ${chunks.length} chunks, ${blob.size} bytes. Sending to Whisper...`);
-          setInterimTranscript('Transcribing with Whisper...');
+          console.log(`[Dictation] Recorded ${chunks.length} chunks, ${blob.size} bytes. Transcribing with Whisper...`);
+          setInterimTranscript('Transcribing speech with Whisper...');
 
           const apiBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
           const reader = new FileReader();
@@ -604,18 +694,18 @@ export function useVoiceSession() {
                   setInterimTranscript('');
                 } else {
                   console.warn('[Dictation] Whisper returned empty transcript');
-                  setInterimTranscript('Could not understand audio. Try again.');
-                  setTimeout(() => setInterimTranscript(''), 2000);
+                  setInterimTranscript('Could not understand speech. Try again.');
+                  setTimeout(() => setInterimTranscript(''), 2500);
                 }
               } else {
                 console.warn('[Dictation] Whisper API error:', res.status);
                 setInterimTranscript('Transcription failed. Try again.');
-                setTimeout(() => setInterimTranscript(''), 2000);
+                setTimeout(() => setInterimTranscript(''), 2500);
               }
             } catch (err) {
               console.error('[Dictation] Whisper network error:', err);
               setInterimTranscript('Transcription error. Check backend.');
-              setTimeout(() => setInterimTranscript(''), 2000);
+              setTimeout(() => setInterimTranscript(''), 2500);
             }
           };
           reader.readAsDataURL(blob);
@@ -1075,6 +1165,7 @@ export function useVoiceSession() {
             if (
               voiceStateRef.current === 'LISTENING' &&
               !isMutedRef.current &&
+              !isDictatingRef.current &&
               mediaRecorderRef.current
             ) {
               const mr = mediaRecorderRef.current;
