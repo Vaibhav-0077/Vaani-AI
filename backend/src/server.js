@@ -184,20 +184,29 @@ app.post('/api/transcribe', async (req, res) => {
     const groqKey = process.env.GROQ_API_KEY;
     const deepgramKey = process.env.DEEPGRAM_API_KEY;
 
-    // Convert base64 data to binary buffer
-    const base64Data = audio.replace(/^data:audio\/\w+;base64,/, '');
+    // Convert base64 data to binary buffer safely stripping any data URL header
+    const base64Data = audio.includes('base64,') ? audio.split('base64,')[1] : audio;
     const audioBuffer = Buffer.from(base64Data, 'base64');
 
     if (audioBuffer.length < 500) {
       return res.json({ transcript: '' });
     }
 
+    // Clean mimeType: e.g. "audio/webm;codecs=opus" -> "audio/webm"
+    const cleanMimeType = (mimeType || 'audio/webm').split(';')[0].trim();
+    const ext = cleanMimeType.includes('wav')
+      ? 'wav'
+      : cleanMimeType.includes('ogg')
+      ? 'ogg'
+      : cleanMimeType.includes('mp4')
+      ? 'm4a'
+      : 'webm';
+
     // 1. Primary: Groq Whisper Large v3 Turbo (~150ms latency)
     if (groqKey && !groqKey.includes('your_groq_api_key')) {
       try {
         const formData = new FormData();
-        const blob = new Blob([audioBuffer], { type: mimeType });
-        const ext = mimeType.includes('wav') ? 'wav' : mimeType.includes('ogg') ? 'ogg' : 'webm';
+        const blob = new Blob([audioBuffer], { type: cleanMimeType });
         formData.append('file', blob, `audio.${ext}`);
         formData.append('model', 'whisper-large-v3-turbo');
         formData.append('response_format', 'json');
@@ -241,7 +250,7 @@ app.post('/api/transcribe', async (req, res) => {
           method: 'POST',
           headers: {
             'Authorization': `Token ${deepgramKey.trim()}`,
-            'Content-Type': mimeType,
+            'Content-Type': cleanMimeType,
             'User-Agent': 'VaaniAgent/1.0',
           },
           body: audioBuffer,
