@@ -1126,24 +1126,35 @@ export function useVoiceSession() {
           }
           const source = audioCtx.createMediaStreamSource(micStream);
           const analyser = audioCtx.createAnalyser();
-          analyser.fftSize = 64;
-          analyser.smoothingTimeConstant = 0.5;
+          analyser.fftSize = 256;
+          analyser.smoothingTimeConstant = 0.3;
           source.connect(analyser);
 
-          const dataArray = new Uint8Array(analyser.frequencyBinCount);
-          let noiseFloor = 3.0;
+          // Force Chrome to continuously render the audio graph with zero-gain sink
+          try {
+            const silentSink = audioCtx.createGain();
+            silentSink.gain.value = 0;
+            analyser.connect(silentSink);
+            silentSink.connect(audioCtx.destination);
+          } catch {}
+
+          const timeDomainData = new Uint8Array(analyser.fftSize);
+          let baselineRms = 0.008;
 
           const meterLoop = () => {
             if (!micStreamRef.current) return;
             if (audioCtx.state === 'suspended') {
               audioCtx.resume().catch(() => {});
             }
-            analyser.getByteFrequencyData(dataArray);
-            let sum = 0;
-            for (let i = 0; i < dataArray.length; i++) {
-              sum += dataArray[i];
+
+            // Calculate true RMS (Root Mean Square) volume level
+            analyser.getByteTimeDomainData(timeDomainData);
+            let sumSquares = 0;
+            for (let i = 0; i < timeDomainData.length; i++) {
+              const norm = (timeDomainData[i] - 128) / 128;
+              sumSquares += norm * norm;
             }
-            const avg = sum / dataArray.length;
+            const rms = Math.sqrt(sumSquares / timeDomainData.length);
 
             // If assistant is actively speaking, clamp visualizer and ignore mic input
             if (isAssistantSpeakingRef.current || voiceStateRef.current === 'SPEAKING') {
@@ -1154,14 +1165,14 @@ export function useVoiceSession() {
 
             // Continuously adapt baseline room noise during silence
             if (!isUserSpeakingRef.current) {
-              noiseFloor = noiseFloor * 0.96 + avg * 0.04;
+              baselineRms = baselineRms * 0.96 + rms * 0.04;
             }
 
-            const speechDelta = avg - noiseFloor;
-            const normalized = Math.min(1.0, Math.max(0, speechDelta / 25));
-            setAudioLevel(normalized);
+            const speechDelta = rms - baselineRms;
+            const normalizedLevel = Math.min(1.0, Math.max(0, speechDelta * 8.0));
+            setAudioLevel(normalizedLevel);
 
-            // Voice Activity Detection (VAD) with adaptive room sensitivity
+            // Voice Activity Detection (VAD) with RMS energy trigger
             if (
               voiceStateRef.current === 'LISTENING' &&
               !isMutedRef.current &&
@@ -1169,7 +1180,7 @@ export function useVoiceSession() {
               mediaRecorderRef.current
             ) {
               const mr = mediaRecorderRef.current;
-              const isSpeaking = speechDelta > 1.8 || avg > 5.0;
+              const isSpeaking = speechDelta > 0.010 || rms > 0.025;
 
               if (isSpeaking) {
                 // User started speaking into microphone
@@ -1179,9 +1190,17 @@ export function useVoiceSession() {
                   if (mr.state === 'inactive') {
                     try {
                       mr.start(100);
-                      console.log(`[VAD] User speaking started (level: ${avg.toFixed(1)}, noise: ${noiseFloor.toFixed(1)})`);
+                      console.log(`[VAD] User speaking started (rms: ${rms.toFixed(4)}, noise: ${baselineRms.toFixed(4)})`);
                     } catch (err) {
                       console.warn('[VAD MediaRecorder Start]', err);
+                      // If MediaRecorder was closed or errored, re-initialize
+                      try {
+                        const newMr = new MediaRecorder(micStream, { mimeType: mr.mimeType });
+                        newMr.ondataavailable = mr.ondataavailable;
+                        newMr.onstop = mr.onstop;
+                        mediaRecorderRef.current = newMr;
+                        newMr.start(100);
+                      } catch {}
                     }
                   }
                   setInterimTranscript('Listening to your voice...');
@@ -1191,7 +1210,7 @@ export function useVoiceSession() {
                   speechSilenceTimerRef.current = null;
                 }
               } else if (isUserSpeakingRef.current) {
-                // User paused speaking -> wait 700ms silence endpointing to finalize turn
+                // User paused speaking -> wait 750ms silence endpointing to finalize turn
                 if (!speechSilenceTimerRef.current) {
                   speechSilenceTimerRef.current = setTimeout(() => {
                     isUserSpeakingRef.current = false;
@@ -1202,7 +1221,7 @@ export function useVoiceSession() {
                         mr.stop();
                       } catch {}
                     }
-                  }, 700);
+                  }, 750);
                 }
               }
             }
