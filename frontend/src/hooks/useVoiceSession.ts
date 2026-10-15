@@ -510,174 +510,147 @@ export function useVoiceSession() {
     addSystemMessage('Voice session disconnected.');
   }, [cleanup, addSystemMessage]);
 
-  // Stop voice dictation into chat input box
+  // Stop voice dictation — stopping the MediaRecorder triggers onstop which sends audio to Whisper
   const stopDictation = useCallback(() => {
     setIsDictating(false);
     isDictatingRef.current = false;
+
+    // Stop SpeechRecognition if it was somehow used
     if (dictationRecognitionRef.current) {
       try {
         dictationRecognitionRef.current.abort();
       } catch {}
       dictationRecognitionRef.current = null;
     }
+
+    // Stop MediaRecorder — this triggers onstop which sends audio to Whisper API
     if (dictationRecorderRef.current && dictationRecorderRef.current.state !== 'inactive') {
       try {
         dictationRecorderRef.current.stop();
+        console.log('[Dictation] MediaRecorder stopped. Audio will be transcribed...');
       } catch {}
-      dictationRecorderRef.current = null;
     }
+    dictationRecorderRef.current = null;
   }, []);
 
-  // Start voice dictation: Real-time speech types directly into the chat input box
+  // Start voice dictation: Records audio via MediaRecorder → sends to Whisper API → types into chat box
   const startDictation = useCallback(() => {
     if (isAssistantSpeakingRef.current) {
       stopPlaybackAudio();
     }
 
-    const SpeechRecognitionClass =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-
     setIsDictating(true);
     isDictatingRef.current = true;
+    setChatInputText('');
+    setInterimTranscript('🎤 Recording your voice... Click mic again or press Enter when done.');
 
-    if (SpeechRecognitionClass) {
+    // Use the already-connected LiveKit mic stream, or grab a new one
+    const existingStream = micStreamRef.current;
+
+    const startRecording = (stream: MediaStream) => {
       try {
-        if (dictationRecognitionRef.current) {
-          try {
-            dictationRecognitionRef.current.abort();
-          } catch {}
-        }
+        const mr = new MediaRecorder(stream, {
+          mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+            ? 'audio/webm;codecs=opus'
+            : 'audio/webm',
+        });
+        dictationRecorderRef.current = mr;
+        dictationChunksRef.current = [];
 
-        const recognition = new SpeechRecognitionClass();
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.maxAlternatives = 1;
-
-        if (settings.language === 'hi-IN') {
-          recognition.lang = 'hi-IN';
-        } else if (settings.language === 'en-US') {
-          recognition.lang = 'en-US';
-        } else {
-          // 'en-IN' works effectively for Indian English, Hinglish, and mixed phrases
-          recognition.lang = 'en-IN';
-        }
-
-        recognition.onstart = () => {
-          console.log('[Dictation] Voice dictation started, speaking into chat box...');
-        };
-
-        recognition.onresult = (event: any) => {
-          let interim = '';
-          let final = '';
-
-          for (let i = 0; i < event.results.length; ++i) {
-            const transcript = event.results[i][0].transcript;
-            if (event.results[i].isFinal) {
-              final += transcript;
-            } else {
-              interim += transcript;
-            }
-          }
-
-          const currentText = (final || interim).trim();
-          if (currentText) {
-            setChatInputText(currentText);
+        mr.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) {
+            dictationChunksRef.current.push(e.data);
           }
         };
 
-        recognition.onerror = (e: any) => {
-          if (e.error !== 'no-speech' && e.error !== 'aborted') {
-            console.warn('[Dictation Recognition Error]', e.error);
-            setIsDictating(false);
-            isDictatingRef.current = false;
-          }
-        };
+        mr.onstop = () => {
+          const chunks = [...dictationChunksRef.current];
+          dictationChunksRef.current = [];
 
-        recognition.onend = () => {
-          // If dictation is still active, restart so user can speak continuously
-          if (isDictatingRef.current) {
-            setTimeout(() => {
-              if (isDictatingRef.current) {
-                try {
-                  recognition.start();
-                } catch {
-                  setIsDictating(false);
-                  isDictatingRef.current = false;
+          // Only stop tracks if we created a NEW stream (not the shared LiveKit one)
+          if (!existingStream) {
+            stream.getTracks().forEach((t) => t.stop());
+          }
+
+          if (chunks.length === 0) {
+            setInterimTranscript('');
+            return;
+          }
+
+          const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
+          console.log(`[Dictation] Recorded ${chunks.length} chunks, ${blob.size} bytes. Sending to Whisper...`);
+          setInterimTranscript('Transcribing with Whisper...');
+
+          const apiBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+          const reader = new FileReader();
+          reader.onloadend = async () => {
+            const base64Data = reader.result as string;
+            try {
+              const res = await fetch(`${apiBaseUrl}/api/transcribe`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  audio: base64Data,
+                  mimeType: blob.type,
+                  language: settings.language,
+                }),
+              });
+              if (res.ok) {
+                const data = await res.json();
+                const transcript = (data.transcript || '').trim();
+                if (transcript) {
+                  console.log('[Dictation] Whisper transcribed:', transcript);
+                  setChatInputText((prev) => (prev ? `${prev} ${transcript}` : transcript));
+                  setInterimTranscript('');
+                } else {
+                  console.warn('[Dictation] Whisper returned empty transcript');
+                  setInterimTranscript('Could not understand audio. Try again.');
+                  setTimeout(() => setInterimTranscript(''), 2000);
                 }
+              } else {
+                console.warn('[Dictation] Whisper API error:', res.status);
+                setInterimTranscript('Transcription failed. Try again.');
+                setTimeout(() => setInterimTranscript(''), 2000);
               }
-            }, 100);
-          }
+            } catch (err) {
+              console.error('[Dictation] Whisper network error:', err);
+              setInterimTranscript('Transcription error. Check backend.');
+              setTimeout(() => setInterimTranscript(''), 2000);
+            }
+          };
+          reader.readAsDataURL(blob);
         };
 
-        recognition.start();
-        dictationRecognitionRef.current = recognition;
-        return;
+        // Record in 250ms chunks for smooth data flow
+        mr.start(250);
+        console.log('[Dictation] MediaRecorder started. Speak now...');
       } catch (err) {
-        console.warn('[Web Speech Dictation Failed, falling back to MediaRecorder]', err);
+        console.error('[Dictation] MediaRecorder failed:', err);
+        setIsDictating(false);
+        isDictatingRef.current = false;
+        setInterimTranscript('Mic recording failed. Check permissions.');
+        setTimeout(() => setInterimTranscript(''), 2000);
       }
-    }
+    };
 
-    // Fallback: If Web Speech API is unavailable in browser, use MediaRecorder + Whisper
-    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+    if (existingStream && existingStream.active && existingStream.getAudioTracks().length > 0) {
+      // Reuse the already-open mic stream from LiveKit connection
+      console.log('[Dictation] Using existing mic stream from LiveKit');
+      startRecording(existingStream);
+    } else {
+      // No active stream → request mic permission directly
+      console.log('[Dictation] Requesting new mic stream');
       navigator.mediaDevices
         .getUserMedia({ audio: true })
         .then((stream) => {
-          try {
-            const mr = new MediaRecorder(stream);
-            dictationRecorderRef.current = mr;
-            dictationChunksRef.current = [];
-
-            mr.ondataavailable = (e) => {
-              if (e.data && e.data.size > 0) dictationChunksRef.current.push(e.data);
-            };
-
-            mr.onstop = () => {
-              stream.getTracks().forEach((t) => t.stop());
-              const chunks = [...dictationChunksRef.current];
-              dictationChunksRef.current = [];
-              if (chunks.length > 0) {
-                const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
-                const apiBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
-                const reader = new FileReader();
-                reader.onloadend = async () => {
-                  const base64Data = reader.result as string;
-                  try {
-                    const res = await fetch(`${apiBaseUrl}/api/transcribe`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        audio: base64Data,
-                        mimeType: blob.type,
-                        language: settings.language,
-                      }),
-                    });
-                    if (res.ok) {
-                      const data = await res.json();
-                      if (data.transcript) {
-                        setChatInputText((prev) =>
-                          prev ? `${prev} ${data.transcript.trim()}` : data.transcript.trim()
-                        );
-                      }
-                    }
-                  } catch (err) {
-                    console.warn('[Dictation Whisper Error]', err);
-                  }
-                };
-                reader.readAsDataURL(blob);
-              }
-            };
-
-            mr.start(250);
-          } catch (err) {
-            console.error('[Dictation MediaRecorder Error]', err);
-            setIsDictating(false);
-            isDictatingRef.current = false;
-          }
+          startRecording(stream);
         })
         .catch((err) => {
-          console.error('[Dictation Mic Access Denied]', err);
+          console.error('[Dictation] Mic access denied:', err);
           setIsDictating(false);
           isDictatingRef.current = false;
+          setInterimTranscript('Microphone access denied.');
+          setTimeout(() => setInterimTranscript(''), 2000);
         });
     }
   }, [settings.language, stopPlaybackAudio]);
@@ -1170,188 +1143,19 @@ export function useVoiceSession() {
     }
   }, [cleanup, addSystemMessage, settings.language, speakText, transcribeAudioBlob]);
 
-  // Continuous Speech Recognition manager with Silence Turn Detection
+  // NOTE: The continuous Web Speech API SpeechRecognition listener has been removed.
+  // It was unable to detect the user's voice on Windows (Chrome's SpeechRecognition
+  // requires exclusive mic access which conflicts with getUserMedia for LiveKit).
+  // Voice input now works exclusively through:
+  //   1. The dictation mic button in the chat input box (MediaRecorder → Whisper)
+  //   2. The VAD + MediaRecorder → Whisper pipeline (automatic, from connect())
+  // Both write recognized text into the chat input box for user review before Enter.
   useEffect(() => {
-    const SpeechRecognitionClass =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-
-    if (!SpeechRecognitionClass) {
-      console.warn('[SpeechRecognition] Web Speech API not supported in this browser.');
-      return;
-    }
-
-    let activeRecognition: any = null;
-    let isStoppedExplicitly = false;
-    let silenceTimer: any = null;
-    let accumulatedText = '';
-
-    const startListener = () => {
-      if (isStoppedExplicitly || isMutedRef.current || isAssistantSpeakingRef.current) {
-        return;
-      }
-
-      if (activeRecognition) {
-        try {
-          activeRecognition.abort();
-        } catch {}
-        activeRecognition = null;
-      }
-
-      try {
-        const recognition = new SpeechRecognitionClass();
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.maxAlternatives = 1;
-
-        if (settings.language === 'hi-IN') {
-          recognition.lang = 'hi-IN';
-        } else if (settings.language === 'en-US') {
-          recognition.lang = 'en-US';
-        } else {
-          // 'auto': 'en-IN' reliably recognises Indian English, Hinglish, and mixed conversational turns
-          recognition.lang = 'en-IN';
-        }
-
-        recognition.onstart = () => {
-          console.log('[STT] Speech recognition active and listening');
-        };
-
-        recognition.onresult = (event: any) => {
-          // Acoustic Echo Gate: Discard if assistant is actively speaking
-          if (isAssistantSpeakingRef.current || voiceStateRef.current === 'SPEAKING') {
-            accumulatedText = '';
-            setInterimTranscript('');
-            return;
-          }
-
-          let interim = '';
-          let final = '';
-
-          for (let i = event.resultIndex; i < event.results.length; ++i) {
-            const transcript = event.results[i][0].transcript;
-            if (event.results[i].isFinal) {
-              final += transcript;
-            } else {
-              interim += transcript;
-            }
-          }
-
-          const currentText = (final || interim).trim();
-          if (currentText) {
-            // Check if this audio is an echo of the assistant's previous speech
-            if (isAcousticEcho(currentText, recentAssistantTextsRef.current)) {
-              console.log('[Echo Filter] Discarded speaker echo (interim):', currentText);
-              accumulatedText = '';
-              setInterimTranscript('');
-              return;
-            }
-
-            accumulatedText = currentText;
-            setInterimTranscript(currentText);
-
-            // Populate the chat input box so user can review/edit before pressing Enter
-            if (!settings.autoSendVoice) {
-              setChatInputText(currentText);
-            }
-
-            // Turn Detection Endpointing: If user pauses speaking for 850ms, finalize and send!
-            clearTimeout(silenceTimer);
-            silenceTimer = setTimeout(() => {
-              const textToSend = accumulatedText.trim();
-              accumulatedText = '';
-              setInterimTranscript('');
-
-              if (textToSend && !isAssistantSpeakingRef.current && voiceStateRef.current !== 'SPEAKING') {
-                if (isAcousticEcho(textToSend, recentAssistantTextsRef.current)) {
-                  console.log('[Echo Filter] Discarded timeout echo:', textToSend);
-                  return;
-                }
-                // Cancel in-flight MediaRecorder buffer so we don't double-send
-                audioChunksRef.current = [];
-                console.log('[STT] User finished speaking (pause):', textToSend);
-                if (settings.autoSendVoice) {
-                  sendMessage(textToSend);
-                } else {
-                  setChatInputText(textToSend);
-                }
-              }
-            }, 850);
-          }
-
-          if (final.trim()) {
-            clearTimeout(silenceTimer);
-            const textToSend = final.trim();
-            accumulatedText = '';
-            setInterimTranscript('');
-
-            if (isAcousticEcho(textToSend, recentAssistantTextsRef.current)) {
-              console.log('[Echo Filter] Discarded final echo:', textToSend);
-              return;
-            }
-
-            // Cancel in-flight MediaRecorder buffer so we don't double-send
-            audioChunksRef.current = [];
-            console.log('[STT] Finalized user voice input (final):', textToSend);
-            if (settings.autoSendVoice) {
-              sendMessage(textToSend);
-            } else {
-              setChatInputText(textToSend);
-            }
-          }
-        };
-
-        recognition.onerror = (event: any) => {
-          if (event.error !== 'no-speech' && event.error !== 'aborted') {
-            console.warn('[SpeechRecognition Error]', event.error);
-          }
-        };
-
-        recognition.onend = () => {
-          activeRecognition = null;
-          // Chrome stops recognition on silence. Auto-restart immediately so mic stays alive!
-          if (!isStoppedExplicitly && !isMutedRef.current && !isAssistantSpeakingRef.current) {
-            setTimeout(() => {
-              if (!isStoppedExplicitly && !isMutedRef.current && !isAssistantSpeakingRef.current) {
-                startListener();
-              }
-            }, 100);
-          }
-        };
-
-        recognition.start();
-        activeRecognition = recognition;
-        speechRecognitionRef.current = recognition;
-      } catch (err) {
-        console.warn('[SpeechRecognition Start Failed]', err);
-        setTimeout(() => {
-          if (!isStoppedExplicitly && !isMutedRef.current && !isAssistantSpeakingRef.current) {
-            startListener();
-          }
-        }, 400);
-      }
-    };
-
-    // Expose startListener to speakText and finishSpeaking via ref
-    startSpeechListenerRef.current = startListener;
-
-    if (connectionStatus === 'CONNECTED' && !isMuted) {
-      isStoppedExplicitly = false;
-      startListener();
-    }
-
+    startSpeechListenerRef.current = () => {};
     return () => {
-      isStoppedExplicitly = true;
       startSpeechListenerRef.current = () => {};
-      clearTimeout(silenceTimer);
-      if (activeRecognition) {
-        try {
-          activeRecognition.abort();
-        } catch {}
-        activeRecognition = null;
-      }
-      speechRecognitionRef.current = null;
     };
-  }, [connectionStatus, isMuted, settings.language, settings.autoSendVoice, sendMessage]);
+  }, [connectionStatus, isMuted]);
 
   // Toggle connection handler
   const toggleConnection = useCallback(() => {
