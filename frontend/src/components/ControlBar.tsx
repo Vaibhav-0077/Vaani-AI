@@ -44,6 +44,11 @@ export const ControlBar: React.FC<ControlBarProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isDictating && onToggleDictation) {
+      // User pressed Enter while recording -> stop dictation so Whisper transcribes immediately into the input box
+      onToggleDictation();
+      return;
+    }
     if (textValue.trim()) {
       onSendMessage(textValue.trim());
       if (onInputTextChange) {
@@ -51,6 +56,13 @@ export const ControlBar: React.FC<ControlBarProps> = ({
       } else {
         setLocalInputText('');
       }
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey && isDictating && onToggleDictation) {
+      e.preventDefault();
+      onToggleDictation();
     }
   };
 
@@ -161,9 +173,10 @@ export const ControlBar: React.FC<ControlBarProps> = ({
               type="text"
               value={textValue}
               onChange={(e) => handleTextChange(e.target.value)}
+              onKeyDown={handleKeyDown}
               placeholder={
                 isDictating
-                  ? 'Listening to your voice... Speak now, then hit Enter'
+                  ? 'Listening... Speak now, then click mic or press Enter'
                   : 'Speak or type here, then press Enter to send...'
               }
               className={`w-full bg-slate-900/90 text-slate-100 placeholder-slate-500 text-sm pl-4 pr-11 py-2.5 rounded-xl border transition-all ${

@@ -157,8 +157,7 @@ export const TranscriptArea: React.FC<TranscriptAreaProps> = ({
                   <User className="w-4 h-4" />
                 </div>
                 <div className="rounded-2xl rounded-tr-none px-4 py-2.5 text-sm bg-indigo-950/30 border border-dashed border-indigo-500/50 text-indigo-200">
-                  <p className="italic">{interimTranscript} ...</p>
-                  <span className="text-[10px] text-indigo-400 block mt-1">Transcribing speech...</span>
+                  <p className="italic">{interimTranscript}</p>
                 </div>
               </div>
             )}
