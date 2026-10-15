@@ -556,14 +556,14 @@ export function useVoiceSession() {
     setChatInputText('');
     setInterimTranscript('');
 
-    // Safety timeout: auto-stop after 30s
+    // Safety timeout: auto-stop after 12s
     if (dictationTimeoutRef.current) clearTimeout(dictationTimeoutRef.current);
     dictationTimeoutRef.current = setTimeout(() => {
       if (isDictatingRef.current) {
-        console.log('[Dictation] Safety timeout reached, stopping dictation...');
+        console.log('[Dictation] Safety timeout reached (12s), stopping dictation...');
         stopDictationRef.current();
       }
-    }, 30000);
+    }, 12000);
 
     // Use the already-connected LiveKit mic stream, or grab a new one
     const existingStream = micStreamRef.current;
@@ -592,10 +592,19 @@ export function useVoiceSession() {
             }
             const src = actx.createMediaStreamSource(stream);
             const analyser = actx.createAnalyser();
-            analyser.fftSize = 64;
+            analyser.fftSize = 256;
+            analyser.smoothingTimeConstant = 0.3;
             src.connect(analyser);
-            const dataArr = new Uint8Array(analyser.frequencyBinCount);
-            let noiseFloor = 3.0;
+
+            try {
+              const silentSink = actx.createGain();
+              silentSink.gain.value = 0;
+              analyser.connect(silentSink);
+              silentSink.connect(actx.destination);
+            } catch {}
+
+            const timeData = new Uint8Array(analyser.fftSize);
+            let baselineRms = 0.008;
 
             const checkAudio = () => {
               if (dictationRecorderRef.current !== mr || mr.state !== 'recording') {
@@ -604,31 +613,34 @@ export function useVoiceSession() {
               if (actx.state === 'suspended') {
                 actx.resume().catch(() => {});
               }
-              analyser.getByteFrequencyData(dataArr);
-              let sum = 0;
-              for (let i = 0; i < dataArr.length; i++) sum += dataArr[i];
-              const avg = sum / dataArr.length;
+              analyser.getByteTimeDomainData(timeData);
+              let sumSquares = 0;
+              for (let i = 0; i < timeData.length; i++) {
+                const norm = (timeData[i] - 128) / 128;
+                sumSquares += norm * norm;
+              }
+              const rms = Math.sqrt(sumSquares / timeData.length);
 
               if (!hasSpoken) {
-                noiseFloor = noiseFloor * 0.95 + avg * 0.05;
+                baselineRms = baselineRms * 0.95 + rms * 0.05;
               }
-              const speechDelta = avg - noiseFloor;
+              const speechDelta = rms - baselineRms;
 
-              if (speechDelta > 1.8 || avg > 4.5) {
+              if (speechDelta > 0.010 || rms > 0.025) {
                 hasSpoken = true;
                 if (silenceTimer) {
                   clearTimeout(silenceTimer);
                   silenceTimer = null;
                 }
               } else if (hasSpoken) {
-                // User spoke and paused: after 1.2s silence auto-stop and transcribe
+                // User spoke and paused: after 800ms silence auto-stop and transcribe
                 if (!silenceTimer) {
                   silenceTimer = setTimeout(() => {
-                    console.log('[Dictation] Silence detected after speaking, finalizing turn...');
+                    console.log('[Dictation] Speech completed + 800ms silence, finalizing...');
                     if (dictationRecorderRef.current === mr && mr.state === 'recording') {
                       stopDictationRef.current();
                     }
-                  }, 1200);
+                  }, 800);
                 }
               }
 
