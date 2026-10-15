@@ -228,7 +228,25 @@ app.post('/api/transcribe', async (req, res) => {
 
         if (whisperRes.ok) {
           const whisperData = await whisperRes.json();
-          const transcript = (whisperData.text || '').trim();
+          let transcript = (whisperData.text || '').trim();
+
+          // Filter out notorious Whisper silence hallucinations
+          const lower = transcript.toLowerCase().replace(/[.,!?;:]/g, '').trim();
+          if (
+            lower === 'thank you' ||
+            lower === 'thanks' ||
+            lower === 'thank you very much' ||
+            lower === 'thank you for watching' ||
+            lower === 'thanks for watching' ||
+            lower === 'please subscribe' ||
+            lower === 'subtitles by' ||
+            lower === 'watching' ||
+            lower === 'you'
+          ) {
+            console.log('[Whisper Filter] Suppressed silence hallucination:', transcript);
+            transcript = '';
+          }
+
           return res.json({
             transcript,
             provider: 'groq-whisper',
