@@ -19,12 +19,16 @@ export function App() {
     errorMessage,
     roomInfo,
     interimTranscript,
+    chatInputText,
+    setChatInputText,
+    isDictating,
     messages,
     settings,
     lastLatencyMetrics,
     interrupt,
     toggleConnection,
     toggleMute,
+    toggleDictation,
     sendMessage,
     clearMessages,
     updateSettings,
@@ -133,6 +137,10 @@ export function App() {
           onSendMessage={sendMessage}
           onOpenSettings={() => setIsSettingsOpen(true)}
           onSimulateState={simulateState}
+          inputText={chatInputText}
+          onInputTextChange={setChatInputText}
+          isDictating={isDictating}
+          onToggleDictation={toggleDictation}
         />
       </footer>
 

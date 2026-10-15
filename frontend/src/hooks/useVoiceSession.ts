@@ -148,6 +148,8 @@ export function useVoiceSession() {
   const [roomInfo, setRoomInfo] = useState<{ name: string; serverUrl: string } | null>(null);
 
   const [interimTranscript, setInterimTranscript] = useState<string>('');
+  const [chatInputText, setChatInputText] = useState<string>('');
+  const [isDictating, setIsDictating] = useState<boolean>(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [lastLatencyMetrics, setLastLatencyMetrics] = useState<LatencyMetrics | null>({
     ttftMs: 95.0,
@@ -163,6 +165,7 @@ export function useVoiceSession() {
     continuousMode: true,
     autoScroll: true,
     debugMode: true, // Default to true in dev for Phase 4 latency instrumentation
+    autoSendVoice: false, // Voice input types into chat box for review before pressing Enter
   });
 
   const roomRef = useRef<Room | null>(null);
@@ -173,6 +176,10 @@ export function useVoiceSession() {
   const activeAudioElementsRef = useRef<HTMLMediaElement[]>([]);
   const speechSynthUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const speechRecognitionRef = useRef<any>(null);
+  const dictationRecognitionRef = useRef<any>(null);
+  const dictationRecorderRef = useRef<MediaRecorder | null>(null);
+  const dictationChunksRef = useRef<Blob[]>([]);
+  const isDictatingRef = useRef<boolean>(false);
 
   const voiceStateRef = useRef<VoiceState>('IDLE');
   const connectionStatusRef = useRef<ConnectionStatus>('DISCONNECTED');
@@ -444,6 +451,21 @@ export function useVoiceSession() {
       speechRecognitionRef.current = null;
     }
 
+    if (dictationRecognitionRef.current) {
+      try {
+        dictationRecognitionRef.current.abort();
+      } catch {}
+      dictationRecognitionRef.current = null;
+    }
+    if (dictationRecorderRef.current && dictationRecorderRef.current.state !== 'inactive') {
+      try {
+        dictationRecorderRef.current.stop();
+      } catch {}
+      dictationRecorderRef.current = null;
+    }
+    isDictatingRef.current = false;
+    setIsDictating(false);
+
     if (animFrameRef.current) {
       cancelAnimationFrame(animFrameRef.current);
       animFrameRef.current = null;
@@ -488,11 +510,198 @@ export function useVoiceSession() {
     addSystemMessage('Voice session disconnected.');
   }, [cleanup, addSystemMessage]);
 
+  // Stop voice dictation into chat input box
+  const stopDictation = useCallback(() => {
+    setIsDictating(false);
+    isDictatingRef.current = false;
+    if (dictationRecognitionRef.current) {
+      try {
+        dictationRecognitionRef.current.abort();
+      } catch {}
+      dictationRecognitionRef.current = null;
+    }
+    if (dictationRecorderRef.current && dictationRecorderRef.current.state !== 'inactive') {
+      try {
+        dictationRecorderRef.current.stop();
+      } catch {}
+      dictationRecorderRef.current = null;
+    }
+  }, []);
+
+  // Start voice dictation: Real-time speech types directly into the chat input box
+  const startDictation = useCallback(() => {
+    if (isAssistantSpeakingRef.current) {
+      stopPlaybackAudio();
+    }
+
+    const SpeechRecognitionClass =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    setIsDictating(true);
+    isDictatingRef.current = true;
+
+    if (SpeechRecognitionClass) {
+      try {
+        if (dictationRecognitionRef.current) {
+          try {
+            dictationRecognitionRef.current.abort();
+          } catch {}
+        }
+
+        const recognition = new SpeechRecognitionClass();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.maxAlternatives = 1;
+
+        if (settings.language === 'hi-IN') {
+          recognition.lang = 'hi-IN';
+        } else if (settings.language === 'en-US') {
+          recognition.lang = 'en-US';
+        } else {
+          // 'en-IN' works effectively for Indian English, Hinglish, and mixed phrases
+          recognition.lang = 'en-IN';
+        }
+
+        recognition.onstart = () => {
+          console.log('[Dictation] Voice dictation started, speaking into chat box...');
+        };
+
+        recognition.onresult = (event: any) => {
+          let interim = '';
+          let final = '';
+
+          for (let i = 0; i < event.results.length; ++i) {
+            const transcript = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+              final += transcript;
+            } else {
+              interim += transcript;
+            }
+          }
+
+          const currentText = (final || interim).trim();
+          if (currentText) {
+            setChatInputText(currentText);
+          }
+        };
+
+        recognition.onerror = (e: any) => {
+          if (e.error !== 'no-speech' && e.error !== 'aborted') {
+            console.warn('[Dictation Recognition Error]', e.error);
+            setIsDictating(false);
+            isDictatingRef.current = false;
+          }
+        };
+
+        recognition.onend = () => {
+          // If dictation is still active, restart so user can speak continuously
+          if (isDictatingRef.current) {
+            setTimeout(() => {
+              if (isDictatingRef.current) {
+                try {
+                  recognition.start();
+                } catch {
+                  setIsDictating(false);
+                  isDictatingRef.current = false;
+                }
+              }
+            }, 100);
+          }
+        };
+
+        recognition.start();
+        dictationRecognitionRef.current = recognition;
+        return;
+      } catch (err) {
+        console.warn('[Web Speech Dictation Failed, falling back to MediaRecorder]', err);
+      }
+    }
+
+    // Fallback: If Web Speech API is unavailable in browser, use MediaRecorder + Whisper
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      navigator.mediaDevices
+        .getUserMedia({ audio: true })
+        .then((stream) => {
+          try {
+            const mr = new MediaRecorder(stream);
+            dictationRecorderRef.current = mr;
+            dictationChunksRef.current = [];
+
+            mr.ondataavailable = (e) => {
+              if (e.data && e.data.size > 0) dictationChunksRef.current.push(e.data);
+            };
+
+            mr.onstop = () => {
+              stream.getTracks().forEach((t) => t.stop());
+              const chunks = [...dictationChunksRef.current];
+              dictationChunksRef.current = [];
+              if (chunks.length > 0) {
+                const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
+                const apiBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+                const reader = new FileReader();
+                reader.onloadend = async () => {
+                  const base64Data = reader.result as string;
+                  try {
+                    const res = await fetch(`${apiBaseUrl}/api/transcribe`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        audio: base64Data,
+                        mimeType: blob.type,
+                        language: settings.language,
+                      }),
+                    });
+                    if (res.ok) {
+                      const data = await res.json();
+                      if (data.transcript) {
+                        setChatInputText((prev) =>
+                          prev ? `${prev} ${data.transcript.trim()}` : data.transcript.trim()
+                        );
+                      }
+                    }
+                  } catch (err) {
+                    console.warn('[Dictation Whisper Error]', err);
+                  }
+                };
+                reader.readAsDataURL(blob);
+              }
+            };
+
+            mr.start(250);
+          } catch (err) {
+            console.error('[Dictation MediaRecorder Error]', err);
+            setIsDictating(false);
+            isDictatingRef.current = false;
+          }
+        })
+        .catch((err) => {
+          console.error('[Dictation Mic Access Denied]', err);
+          setIsDictating(false);
+          isDictatingRef.current = false;
+        });
+    }
+  }, [settings.language, stopPlaybackAudio]);
+
+  // Toggle voice dictation in chat box
+  const toggleDictation = useCallback(() => {
+    if (isDictatingRef.current) {
+      stopDictation();
+    } else {
+      startDictation();
+    }
+  }, [startDictation, stopDictation]);
+
   // Fallback text / voice message handler
   const sendMessage = useCallback(
     (content: string) => {
       if (!content.trim()) return;
       const text = content.trim();
+
+      // Clear chat input box and halt dictation
+      setChatInputText('');
+      if (isDictatingRef.current) {
+        stopDictation();
+      }
 
       // Universal Acoustic Echo Protection: Discard if incoming text echoes assistant's recent speech
       if (isAcousticEcho(text, recentAssistantTextsRef.current)) {
@@ -575,7 +784,7 @@ export function useVoiceSession() {
         speakText(replyText);
       })();
     },
-    [settings.language, speakText]
+    [settings.language, speakText, stopDictation]
   );
 
   // High-accuracy server-side audio transcription via Groq Whisper Large v3 Turbo & Deepgram
@@ -611,7 +820,12 @@ export function useVoiceSession() {
                   console.warn('[Echo Filter] Discarded Whisper echo:', transcript);
                   return;
                 }
-                sendMessage(transcript);
+                if (settings.autoSendVoice) {
+                  sendMessage(transcript);
+                } else {
+                  // Types directly into the chat input box for user review before Enter
+                  setChatInputText((prev) => (prev ? `${prev} ${transcript}` : transcript));
+                }
               } else {
                 setInterimTranscript('');
               }
@@ -632,7 +846,7 @@ export function useVoiceSession() {
         isTranscribingRef.current = false;
       }
     },
-    [settings.language, sendMessage]
+    [settings.language, settings.autoSendVoice, sendMessage]
   );
 
   // Connect function
@@ -1035,6 +1249,11 @@ export function useVoiceSession() {
             accumulatedText = currentText;
             setInterimTranscript(currentText);
 
+            // Populate the chat input box so user can review/edit before pressing Enter
+            if (!settings.autoSendVoice) {
+              setChatInputText(currentText);
+            }
+
             // Turn Detection Endpointing: If user pauses speaking for 850ms, finalize and send!
             clearTimeout(silenceTimer);
             silenceTimer = setTimeout(() => {
@@ -1049,8 +1268,12 @@ export function useVoiceSession() {
                 }
                 // Cancel in-flight MediaRecorder buffer so we don't double-send
                 audioChunksRef.current = [];
-                console.log('[STT] Finalized user voice input (pause):', textToSend);
-                sendMessage(textToSend);
+                console.log('[STT] User finished speaking (pause):', textToSend);
+                if (settings.autoSendVoice) {
+                  sendMessage(textToSend);
+                } else {
+                  setChatInputText(textToSend);
+                }
               }
             }, 850);
           }
@@ -1069,7 +1292,11 @@ export function useVoiceSession() {
             // Cancel in-flight MediaRecorder buffer so we don't double-send
             audioChunksRef.current = [];
             console.log('[STT] Finalized user voice input (final):', textToSend);
-            sendMessage(textToSend);
+            if (settings.autoSendVoice) {
+              sendMessage(textToSend);
+            } else {
+              setChatInputText(textToSend);
+            }
           }
         };
 
@@ -1124,7 +1351,7 @@ export function useVoiceSession() {
       }
       speechRecognitionRef.current = null;
     };
-  }, [connectionStatus, isMuted, settings.language, sendMessage]);
+  }, [connectionStatus, isMuted, settings.language, settings.autoSendVoice, sendMessage]);
 
   // Toggle connection handler
   const toggleConnection = useCallback(() => {
@@ -1209,6 +1436,12 @@ export function useVoiceSession() {
     errorMessage,
     roomInfo,
     interimTranscript,
+    chatInputText,
+    setChatInputText,
+    isDictating,
+    toggleDictation,
+    startDictation,
+    stopDictation,
     messages,
     settings,
     lastLatencyMetrics,

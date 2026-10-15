@@ -10,6 +10,10 @@ interface ControlBarProps {
   onSendMessage: (text: string) => void;
   onOpenSettings: () => void;
   onSimulateState?: (state: VoiceState) => void;
+  inputText?: string;
+  onInputTextChange?: (text: string) => void;
+  isDictating?: boolean;
+  onToggleDictation?: () => void;
 }
 
 export const ControlBar: React.FC<ControlBarProps> = ({
@@ -20,15 +24,33 @@ export const ControlBar: React.FC<ControlBarProps> = ({
   onSendMessage,
   onOpenSettings,
   onSimulateState,
+  inputText,
+  onInputTextChange,
+  isDictating = false,
+  onToggleDictation,
 }) => {
-  const [inputText, setInputText] = useState('');
+  const [localInputText, setLocalInputText] = useState('');
   const [showSimMenu, setShowSimMenu] = useState(false);
+
+  const textValue = inputText !== undefined ? inputText : localInputText;
+
+  const handleTextChange = (val: string) => {
+    if (onInputTextChange) {
+      onInputTextChange(val);
+    } else {
+      setLocalInputText(val);
+    }
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (inputText.trim()) {
-      onSendMessage(inputText.trim());
-      setInputText('');
+    if (textValue.trim()) {
+      onSendMessage(textValue.trim());
+      if (onInputTextChange) {
+        onInputTextChange('');
+      } else {
+        setLocalInputText('');
+      }
     }
   };
 
@@ -131,26 +153,55 @@ export const ControlBar: React.FC<ControlBarProps> = ({
           )}
         </div>
 
-        {/* Text Input Fallback with Send Button */}
+        {/* Text Input with In-Input Voice Dictation and Send Button */}
         <form onSubmit={handleSubmit} className="flex-1 flex items-center gap-2 w-full">
-          <div className="relative flex-1">
+          <div className="relative flex-1 flex items-center">
             <input
               id="text-fallback-input"
               type="text"
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder="Or type a message to the agent (fallback)..."
-              className="w-full bg-slate-900/90 text-slate-100 placeholder-slate-500 text-sm px-4 py-2.5 rounded-xl border border-slate-800 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all"
+              value={textValue}
+              onChange={(e) => handleTextChange(e.target.value)}
+              placeholder={
+                isDictating
+                  ? 'Listening to your voice... Speak now, then hit Enter'
+                  : 'Speak or type here, then press Enter to send...'
+              }
+              className={`w-full bg-slate-900/90 text-slate-100 placeholder-slate-500 text-sm pl-4 pr-11 py-2.5 rounded-xl border transition-all ${
+                isDictating
+                  ? 'border-indigo-500 ring-2 ring-indigo-500/30 bg-indigo-950/20'
+                  : 'border-slate-800 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500'
+              }`}
             />
+
+            {/* In-Input Voice Dictation Mic Button */}
+            {onToggleDictation && (
+              <button
+                type="button"
+                id="input-dictate-btn"
+                onClick={onToggleDictation}
+                title={
+                  isDictating
+                    ? 'Stop listening (click or press Enter to send)'
+                    : 'Click to speak directly into this box'
+                }
+                className={`absolute right-2.5 p-1.5 rounded-lg transition-all cursor-pointer ${
+                  isDictating
+                    ? 'bg-rose-500 text-white animate-pulse shadow-md shadow-rose-500/40 ring-2 ring-rose-400'
+                    : 'text-slate-400 hover:text-indigo-400 hover:bg-slate-800'
+                }`}
+              >
+                {isDictating ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+              </button>
+            )}
           </div>
 
           <button
             id="send-message-btn"
             type="submit"
-            disabled={!inputText.trim()}
+            disabled={!textValue.trim()}
             aria-label="Send message"
             className={`p-2.5 rounded-xl border transition-all cursor-pointer ${
-              inputText.trim()
+              textValue.trim()
                 ? 'bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-500 shadow-md shadow-indigo-600/20 hover:scale-105 active:scale-95'
                 : 'bg-slate-900 text-slate-600 border-slate-800 cursor-not-allowed opacity-50'
             }`}

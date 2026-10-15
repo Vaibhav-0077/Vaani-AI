@@ -37,6 +37,7 @@ export interface AgentSettings {
   continuousMode: boolean;
   autoScroll: boolean;
   debugMode?: boolean; // Toggles real-time latency inspection panel
+  autoSendVoice?: boolean; // If false (default), voice input is typed into chat box for review before pressing Enter
   selectedMicrophoneId?: string;
 }
 

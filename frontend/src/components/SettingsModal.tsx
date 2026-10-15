@@ -136,6 +136,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             <div className="flex items-center justify-between">
               <div>
+                <p className="font-medium text-slate-300">Auto-Send Spoken Voice</p>
+                <p className="text-[11px] text-slate-500">
+                  Send speech immediately upon pause (default off: types into chat box to review before Enter)
+                </p>
+              </div>
+              <input
+                id="settings-autosend-toggle"
+                type="checkbox"
+                checked={settings.autoSendVoice ?? false}
+                onChange={(e) =>
+                  onUpdateSettings({ autoSendVoice: e.target.checked })
+                }
+                className="w-4 h-4 accent-indigo-500 rounded cursor-pointer"
+              />
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
                 <p className="font-medium text-cyan-300">Debug / Latency Inspector</p>
                 <p className="text-[11px] text-slate-500">
                   Display real-time TTFT, TTFA, and turn latency telemetry (Phase 4)
