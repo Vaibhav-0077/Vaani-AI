@@ -30,6 +30,15 @@ function sanitizeString(str, defaultValue, maxLength = 64) {
   return str.trim().replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, maxLength);
 }
 
+// 0. Root status endpoint
+app.get('/', (req, res) => {
+  res.json({
+    status: 'online',
+    service: 'Vaani-AI Backend API',
+    message: 'Backend server is running successfully! Use /api/health to inspect system health.',
+  });
+});
+
 // 1. Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({
