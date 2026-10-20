@@ -142,6 +142,18 @@ export function App() {
           isDictating={isDictating}
           onToggleDictation={toggleDictation}
         />
+        <div className="mt-2 text-center text-[11px] text-slate-500 flex items-center justify-center gap-1.5">
+          <span>Designed &amp; Built with ❤️ by</span>
+          <a
+            href="https://vaibhavguigade.onrender.com/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-medium text-indigo-400 hover:text-indigo-300 transition-colors inline-flex items-center gap-0.5 hover:underline underline-offset-2"
+          >
+            Vaibhav
+            <span className="text-[10px]">↗</span>
+          </a>
+        </div>
       </footer>
 
       {/* Settings Modal */}
